@@ -1,0 +1,46 @@
+# Continuous integration: on every push and pull request, check that both versions of the
+# firmware still build on a clean machine, and that the Arduino copy matches main/.
+# It does not test the hardware; that still needs a StickS3.
+name: Build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  esp-idf:
+    name: ESP-IDF v6.1
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build with ESP-IDF (target esp32s3)
+        uses: espressif/esp-idf-ci-action@v1.2.0
+        with:
+          esp_idf_version: v6.1
+          target: esp32s3
+          path: '.'
+
+  arduino:
+    name: Arduino (esp32 core 3.3.0)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Arduino copy is up to date with main/
+        run: python3 tools/sync_arduino.py --check
+      - name: Compile the Arduino sketch
+        uses: arduino/compile-sketches@v1.1.4
+        with:
+          fqbn: esp32:esp32:esp32s3:CDCOnBoot=cdc,USBMode=hwcdc,CPUFreq=240,FlashSize=8M,PartitionScheme=custom,PSRAM=opi
+          platforms: |
+            - name: esp32:esp32
+              version: 3.3.0
+              source-url: https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          libraries: |
+            - name: M5Unified
+              version: 0.3.0
+            - name: M5GFX
+              version: 0.3.0
+          sketch-paths: |
+            - arduino/sticks3_imu_logger
+          enable-warnings-report: false

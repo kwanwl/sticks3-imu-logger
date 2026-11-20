@@ -1,5 +1,7 @@
 # StickS3 IMU Viewer and Logger
 
+[![Build](https://github.com/kwanwl/sticks3-imu-logger/actions/workflows/build.yml/badge.svg)](https://github.com/kwanwl/sticks3-imu-logger/actions/workflows/build.yml)
+
 Firmware for the **M5Stack StickS3** that shows, records and streams data from its BMI270 motion sensor (IMU), for physics experiments with acceleration and angular velocity.
 
 - 4 screen pages: acceleration, angular velocity and angles, 3-D orientation, recording
@@ -217,6 +219,7 @@ sticks3-imu-logger/
   tools/
     sync_arduino.py     copies main/ into the Arduino sketch, generates index_html.h
     make_docx.py        makes Word versions of the documents (needs pandoc)
+  .github/workflows/build.yml   CI: builds both versions on every push (GitHub Actions)
   firmware/
     sticks3-imu-logger.bin   merged image for browser flashing (address 0x0)
   usb/

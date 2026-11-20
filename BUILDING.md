@@ -130,6 +130,7 @@ cp build/sticks3-imu-logger.bin firmware/
 1. Change `"version"` in `flasher/manifest.json` and the version line in `flasher/index.html`.
 2. Optionally check the Arduino build: `cd arduino/sticks3_imu_logger && arduino-cli compile .`
 3. Commit and push. GitHub Pages serves the new installer, image and USB page within a minute or two.
+4. Check the **Build** status (green tick on the commit, or the badge in the README): GitHub Actions builds both versions on every push and checks that the Arduino copy matches `main/`. It does not test the hardware.
 
 ---
 
