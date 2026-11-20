@@ -269,6 +269,11 @@ async function usbRead() {
   } finally {
     reader.releaseLock();
     clearInterval(usb.keep);
+    // Fail whatever was in progress at once (a download, LIST, DEL), so the page does not
+    // wait for timeouts after the cable is pulled.
+    dlFail('USB disconnected');
+    for (const w of usb.waiters.splice(0)) { clearTimeout(w.timer); w.reject(new Error('USB disconnected')); }
+    usb.buf = '';
     try { usb.writer.releaseLock(); await usb.port.close(); } catch (e) {}
     usb.writer = usb.port = null;
     $('usbBtn').hidden = false;
