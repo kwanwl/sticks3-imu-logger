@@ -82,7 +82,7 @@ The page works over **Wi-Fi** (any phone or laptop) or over the **USB cable** (C
 2. In Chrome or Edge open **<https://kwanwl.github.io/sticks3-imu-logger/usb/>** (needs internet once to load).
 3. Click **Connect USB** and choose the port named like `USB JTAG/serial debug unit`.
 
-Connecting does not restart the StickS3, so a recording in progress carries on. Live graphs, the views and downloading or deleting recordings work exactly as over Wi-Fi.
+Connecting does not restart the StickS3, so a recording in progress carries on. Live graphs, the views and downloading or deleting recordings work exactly as over Wi-Fi, and the live view gets every sample (100 Hz).
 
 **Many devices in one room:** every StickS3 has its own name, made from the last 6 hex digits of its factory MAC address (e.g. `IMU-DA5734`), so names do not repeat. The name never changes and is the same whichever firmware version is flashed, so it can go on a sticker. The hotspots are spread over Wi-Fi channels 1, 6 and 11 (chosen from the same address; about a third of the devices on each), and each one is set up to use as little airtime as possible (see "How the code works"). Each StickS3 accepts up to 4 browsers. If the live view still lags with a whole class, use the USB connection.
 
@@ -96,9 +96,9 @@ The page has five buttons: **Accel, Gyro, Orient, Record, Live**. With **Follow 
 | Record | Recording progress, length and last file; saved runs with **Download** and **Delete** | 4 |
 | Live | Acceleration and angular-velocity graphs together | browser only |
 
-- The live view shows **25 samples per second** (every 4th sample) for the last 10 s; this keeps Wi-Fi traffic low with many devices. **Recordings always keep the full 100 Hz.**
+- The live view shows the last 10 s: **25 samples per second over Wi-Fi** (every 4th sample, to keep Wi-Fi traffic low with many devices) and the **full 100 Hz over USB**. Over Wi-Fi, events shorter than about 40 ms (an impact, the moment of release) can be missed or look smaller. **Recordings always keep the full 100 Hz.**
 - **Drag** a 3-D view to turn the camera.
-- **Pause** freezes the graphs. **Save CSV** downloads what is on them as `live_YYYYMMDD-HHMMSS.csv` at 25 Hz (press Pause first to capture a moment; for 100 Hz data use a recording). On iPhone the file goes to *Files → Downloads*.
+- **Pause** freezes the graphs. **Save CSV** downloads what is on them as `live_YYYYMMDD-HHMMSS.csv` (25 Hz over Wi-Fi, 100 Hz over USB; press Pause first to capture a moment). On iPhone the file goes to *Files → Downloads*.
 
 ### StickS3 axes
 Measured on a StickS3 (19 Nov 2026) and used by the 3-D model. Hold it with the screen facing you and USB-C at the bottom:
@@ -231,7 +231,7 @@ sticks3-imu-logger/
 | Change | Where |
 | --- | --- |
 | Sample rate (100 Hz) | `SAMPLE_HZ` in `main/app.h` |
-| Live view rate (25 Hz) | `LIVE_HZ` in `main/app.h` |
+| Wi-Fi live view rate (25 Hz; USB always sends 100 Hz) | `LIVE_HZ` in `main/app.h` |
 | Wi-Fi transmit power, beacon interval | `TX_POWER_QDBM`, `BEACON_TU` in `main/net.cpp` |
 | Longest recording (60 s) | `MAX_REC_S` in `main/app.h` |
 | Recording lengths offered | `DURATIONS[]` in `main/main.cpp` |
@@ -298,7 +298,7 @@ Three FreeRTOS tasks share data through `main/app.h`:
 | `imu` | `imu.cpp` | 1 / 10 | Every 10 ms: read buttons and IMU (the only I2C user), integrate θ and the quaternion, zeroing, recording, live ring buffer, publish a snapshot |
 | `main` | `main.cpp` | default | Screen at 10 Hz, button actions, write the recording to `RUNnn.TMP`, then rename it to `RUNnn.CSV` |
 | `live` + HTTP server | `net.cpp` | 0 / 5 | Every 100 ms send a status line and the new samples (thinned to 25 Hz) to all WebSocket clients; serve the page and files |
-| `usb` | `usb.cpp` | 0 / 4 | Every 100 ms read commands from the USB cable; send files, and the live stream while a page asks for it |
+| `usb` | `usb.cpp` | 0 / 4 | Every 100 ms read commands from the USB cable; send files, and the live stream (all samples, 100 Hz) while a page asks for it |
 
 - **Hand-over between tasks:** the IMU task publishes `ImuView` under a short spinlock (`imu_view()`); button events, page, recording progress and zeroing state are atomics.
 - **Recording** fills a 168 KB PSRAM buffer at 100 Hz, then `main.cpp` writes the CSV, so flash writes never disturb the sample timing. The file is written as `.TMP` and renamed only if every write succeeded; leftover `.TMP` files are removed at start-up.
@@ -339,7 +339,7 @@ The USB page (Web Serial) sends one command per line; the StickS3 replies with l
 | `LIST` | `@F,<name>,<size>` per recording, then `@FILES,<count>` |
 | `GET <name>` | `@BEGIN,<name>,<size>`, exactly `<size>` bytes of the file, a newline, `@END,<name>` |
 | `DEL <name>` | `@OK,DEL,<name>` or `@ERR,DEL,<name>` |
-| `LIVE 1` / `LIVE 0` | Starts / stops the live stream: `@S,…` and `@L,…` lines with the same fields as the WebSocket stream. The page repeats `LIVE 1` every 3 s; the stream stops by itself 10 s after the last one |
+| `LIVE 1` / `LIVE 0` | Starts / stops the live stream: `@S,…` and `@L,…` lines with the same fields as the WebSocket stream, but every sample (100 Hz). The page repeats `LIVE 1` every 3 s; the stream stops by itself 10 s after the last one |
 
 ---
 

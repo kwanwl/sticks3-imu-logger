@@ -233,7 +233,8 @@ static void send_batch(void* arg)
 //   bat_pct 0-100 (-1 unknown, smoothed), bat_mv in millivolts, charging 0/1 (USB power present).
 // Sample lines:
 //   t_ms,ax,ay,az,wx,wy,wz   (ms since boot, g, deg/s; gyro offset not removed)
-// Over USB the same lines start with "@S," and "@L," instead (see usb.cpp).
+// Over USB the same lines start with "@S," and "@L," instead, and every sample is sent
+// (100 Hz; see usb.cpp).
 //
 // Back-pressure (Wi-Fi): sending runs on the server task and can block (slow or sleeping
 // client, a download in progress). At most MAX_PENDING messages may wait; while that many

@@ -14,7 +14,8 @@
 //                     then a newline and @END,<name>
 //   DEL <name>     -> @OK,DEL,<name>  or  @ERR,DEL,<name>
 // Live stream (every 100 ms while on): @S,<status fields> and @L,<sample> lines, the same
-// fields as the Wi-Fi stream (see net.cpp). Other lines (e.g. "# ..." log lines) are ignored
+// fields as the Wi-Fi stream (see net.cpp), but with every sample (100 Hz): a USB cable has
+// plenty of capacity and does not share the crowded Wi-Fi band, so it is not thinned. Other lines (e.g. "# ..." log lines) are ignored
 // by the page.
 //
 // Both builds (ESP-IDF and Arduino) install ESP-IDF's USB-Serial-JTAG driver and route the
@@ -37,7 +38,6 @@
 #include "freertos/task.h"
 #include "app.h"
 
-static constexpr int LIVE_STEP = SAMPLE_HZ / LIVE_HZ;
 static constexpr int64_t LIVE_TIMEOUT_MS = 10000;     // stop streaming if the page goes quiet
 
 // ------------------------------------------------------------------------------- transport
@@ -178,7 +178,7 @@ static void usb_task(void*)
             }
         }
 
-        // Live stream, thinned to LIVE_HZ exactly like the Wi-Fi stream
+        // Live stream at the full sample rate
         if (live && now_ms > live_until) live = false;
         if (!live) { tail = live_head; continue; }
         const uint32_t head = live_head;
@@ -188,8 +188,7 @@ static void usb_task(void*)
         const int st = status_fields(msg + 3, 256);
         if (st > 0) { memcpy(msg, "@S,", 3); len = 3 + st; msg[len++] = '\n'; }
         for (; tail != head; tail++) {
-            if (tail % LIVE_STEP) continue;
-            if (len > (int)sizeof(msg) - 80) break;
+            if (len > (int)sizeof(msg) - 80) break;      // rest goes in the next message
             memcpy(msg + len, "@L,", 3);
             len += 3;
             len += sample_line(msg + len, 64, live_ring[tail % LIVE_N]);

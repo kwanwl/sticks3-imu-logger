@@ -13,7 +13,8 @@ static const char INDEX_HTML[] = R"html_page(<!doctype html>
 
   Views: Accel, Gyro, Orient, Record follow the StickS3's pages 1-4 when "Follow StickS3" is
   ticked; Live (both graphs) is a browser-only view.
-  Data: every 100 ms a status line plus samples thinned to 25 Hz (recordings keep 100 Hz).
+  Data: every 100 ms a status line plus samples: 25 Hz over Wi-Fi (thinned, to save airtime),
+  the full 100 Hz over USB; recordings always keep 100 Hz.
   Wi-Fi lines: "#S,..." and plain samples; USB lines: "@S,..." and "@L,..." (net.cpp, usb.cpp).
 -->
 <html lang="en">
@@ -142,7 +143,7 @@ static const char INDEX_HTML[] = R"html_page(<!doctype html>
   </div>
 </section>
 
-<p class="muted" id="foot">Last 10 s at 25 Hz (recordings keep 100 Hz). Save CSV downloads what is on the graphs (press Pause first to freeze a moment); columns as in recordings.</p>
+<p class="muted" id="foot">Last 10 s, <span id="rate">25 Hz over Wi-Fi</span> (recordings always keep 100 Hz). Save CSV downloads what is on the graphs (press Pause first to freeze a moment); columns as in recordings.</p>
 
 <script>
 // ---------------------------------------------------------------- settings
@@ -549,7 +550,7 @@ function frame() {
 }
 
 // ---------------------------------------------------------------- Save CSV
-// Download the samples on the graphs (last 10 s, 25 Hz), same columns as recordings,
+// Download the samples on the graphs (last 10 s; 25 Hz over Wi-Fi, 100 Hz over USB), same columns as recordings,
 // with t_ms starting at 0. Named with the phone/laptop clock.
 function saveText(name, text) {
   const url = URL.createObjectURL(new Blob([text], {type: 'text/csv'}));
@@ -628,6 +629,7 @@ async function loadFiles() {
 }
 
 setView(0);
+$('rate').textContent = USB ? '100 Hz over USB' : '25 Hz over Wi-Fi';
 if (USB) {
   $('usbBtn').hidden = false;
   $('usbBtn').onclick = usbConnect;

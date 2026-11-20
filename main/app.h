@@ -15,7 +15,7 @@
 #include <cstdint>
 
 static constexpr int SAMPLE_HZ = 100;                // IMU sampling and recording rate
-static constexpr int LIVE_HZ   = 25;                 // live view rate (Wi-Fi and USB): every 4th sample
+static constexpr int LIVE_HZ   = 25;                 // Wi-Fi live view rate: every 4th sample (USB sends all)
 static constexpr int MAX_REC_S = 60;                 // longest recording, sizes the RAM buffer
 static constexpr const char* DATA_DIR = "/data";     // where the FAT partition is mounted
 
