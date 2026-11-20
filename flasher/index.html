@@ -1,0 +1,74 @@
+<!doctype html>
+<!--
+  One-click web flasher for the StickS3 IMU Logger, served by GitHub Pages at
+  https://kwanwl.github.io/sticks3-imu-logger/flasher/
+  Uses ESP Web Tools (by ESPHome) and manifest.json in this folder, which points at
+  ../firmware/sticks3-imu-logger.bin (merged image, written at address 0x0).
+  "new_install_prompt_erase": false in the manifest means the flash is never erased,
+  so recordings saved on the StickS3 are kept.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StickS3 IMU Logger – Install</title>
+<script type="module" src="https://unpkg.com/esp-web-tools@10.4.0/dist/web/install-button.js?module"></script>
+<style>
+  :root { --bg:#fff; --fg:#1d1d1f; --muted:#6e6e73; --line:#d2d2d7; --card:#f5f5f7; --accent:#1f7ae0; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#111; --fg:#f2f2f2; --muted:#a1a1a6; --line:#3a3a3c; --card:#1c1c1e; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0 auto; max-width:720px; padding:24px 16px; font:16px/1.5 system-ui, sans-serif; background:var(--bg); color:var(--fg); }
+  h1 { font-size:24px; margin:0 0 4px; }
+  h2 { font-size:18px; margin:28px 0 8px; }
+  .muted { color:var(--muted); }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; margin:16px 0; }
+  ol, ul { padding-left:22px; } li { margin:4px 0; }
+  code { font-size:14px; }
+  esp-web-install-button button[slot="activate"] {
+    font:600 17px system-ui, sans-serif; padding:12px 28px; border:0; border-radius:10px;
+    background:var(--accent); color:#fff; cursor:pointer;
+  }
+  table { border-collapse:collapse; width:100%; }
+  td, th { text-align:left; padding:8px 6px; border-bottom:1px solid var(--line); vertical-align:top; }
+</style>
+</head>
+<body>
+<h1>StickS3 IMU Logger</h1>
+<div class="muted">Install or update the firmware on an M5Stack StickS3 from this page. Firmware version 2026-11-20.</div>
+
+<div class="card">
+  <ol>
+    <li>Use <b>Chrome or Edge on a computer</b> (Windows, macOS, Linux or ChromeOS). Safari, Firefox, phones and iPads cannot do this.</li>
+    <li>Connect the StickS3 with a <b>USB-C data cable</b> (not a charge-only cable). Close the Arduino IDE, serial monitors and other flashers.</li>
+    <li>Click <b>Install</b>, choose the port named like <code>USB JTAG/serial debug unit</code> (macOS: <code>cu.usbmodem…</code>; Windows: <code>COM…</code>), then confirm.</li>
+    <li>Wait until it reports success (about 30 s). The StickS3 restarts with the logger on page 1.</li>
+  </ol>
+  <esp-web-install-button manifest="manifest.json">
+    <button slot="activate">Install</button>
+    <span slot="unsupported">This browser cannot flash devices. Please use Chrome or Edge on a computer.</span>
+    <span slot="not-allowed">Flashing needs a secure page (https).</span>
+  </esp-web-install-button>
+  <p class="muted">Recordings saved on the StickS3 are kept: this installer never erases the flash.</p>
+</div>
+
+<h2>If something goes wrong</h2>
+<table>
+  <tr><th>Problem</th><th>What to do</th></tr>
+  <tr><td>No port appears, or it fails to connect</td><td>Put the StickS3 in <b>download mode</b>: with USB connected, hold the <b>power button</b> (the small button next to the USB-C port) for about 2 s until the internal green LED blinks. Then click Install again.</td></tr>
+  <tr><td>Finished, but the screen stays blank</td><td>It is still in download mode: unplug the cable, <b>double-press</b> the power button to turn it off, then press it once to turn it on.</td></tr>
+  <tr><td>Still no port</td><td>Try another USB-C cable (many only charge) or another USB port. On Linux, add your user to the <code>dialout</code> group and log in again.</td></tr>
+  <tr><td>The Install button is missing</td><td>The browser does not support Web Serial: use Chrome or Edge on a computer.</td></tr>
+</table>
+
+<h2>Other ways to install</h2>
+<ul>
+  <li><b>Espressif's web flasher</b> (any ESP32): open <a href="https://espressif.github.io/esptool-js/">espressif.github.io/esptool-js</a>, click Connect, add <a href="../firmware/sticks3-imu-logger.bin"><code>sticks3-imu-logger.bin</code></a> at address <code>0x0</code>, click Program. Do not press "Erase Flash" unless you want to delete the recordings.</li>
+  <li><b>From source</b> with ESP-IDF or the Arduino IDE: see the <a href="https://github.com/kwanwl/sticks3-imu-logger">repository README</a>.</li>
+</ul>
+
+<h2>After installing</h2>
+<p>The StickS3 starts its own Wi-Fi hotspot, named like <code>IMU-DA5734</code> (shown on page 1). Join it and open <b>http://192.168.4.1</b> for live graphs and recordings. KEY2 (side button) changes page; KEY1 (blue button) zeroes, records and switches modes.</p>
+</body>
+</html>

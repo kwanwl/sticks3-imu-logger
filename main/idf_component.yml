@@ -1,0 +1,7 @@
+# Components downloaded by the ESP-IDF component manager into managed_components/.
+# Exact versions are recorded in dependencies.lock (commit it so every build is the same).
+dependencies:
+  idf: ">=6.0"
+  # M5Stack's board library: display (M5GFX), IMU, buttons and power for the StickS3.
+  # Tested with 0.3.0; "~0.3.0" accepts bug-fix releases only.
+  m5stack/m5unified: "~0.3.0"

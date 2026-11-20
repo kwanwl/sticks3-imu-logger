@@ -1,0 +1,29 @@
+# Build output and downloaded components (recreated by idf.py build)
+build/
+managed_components/
+
+# Generated from sdkconfig.defaults; keep settings in sdkconfig.defaults instead
+sdkconfig
+sdkconfig.old
+
+# Editor and OS files
+.cache/
+.vscode/
+.DS_Store
+*.log
+
+# Illustrated guide and M5Stack product photos: distributed separately, not published here
+docs/guide-with-images.md
+docs/images/
+
+# Internal planning document (shared separately)
+docs/plan.md
+
+# Internal teaching activities (shared separately)
+docs/activities.md
+
+# Word versions of the documents (made by tools/make_docx.py, shared separately)
+docs/*.docx
+
+# Python caches
+__pycache__/

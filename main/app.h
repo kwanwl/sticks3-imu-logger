@@ -1,0 +1,96 @@
+// app.h - definitions shared by the three parts of the firmware
+//
+//   imu.cpp   IMU task: samples the BMI270 at SAMPLE_HZ, reads the buttons, integrates
+//             angles, fills the recording buffer and the live ring buffer.
+//   main.cpp  Screen and user interface (app_main): pages, button actions, saving files.
+//   net.cpp   Storage (FAT partition), Wi-Fi hotspot, web server and live WebSocket stream.
+//
+// Threading: imu.cpp's task is the only code that uses the I2C bus (IMU and buttons via
+// M5.update()). Other tasks read its results through imu_view() (a short critical section)
+// or through atomics, so no locks are held across slow operations.
+#pragma once
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+
+static constexpr int SAMPLE_HZ = 100;                // IMU sampling, recording and live stream rate
+static constexpr int MAX_REC_S = 60;                 // longest recording, sizes the RAM buffer
+static constexpr const char* DATA_DIR = "/data";     // where the FAT partition is mounted
+
+// One IMU reading as recorded, streamed and saved.
+struct Sample {
+    uint32_t t_ms;                                   // ms since boot (live) or since start (recording)
+    float ax, ay, az;                                // acceleration in g
+    float wx, wy, wz;                                // angular velocity in deg/s, as measured (offset not removed)
+};
+
+// ------------------------------------------------------------------------------- imu.cpp
+// Configure the BMI270 and start the IMU task (call once, after M5.begin()).
+// Returns false if the task could not be created.
+bool imu_start(void);
+
+// Latest values for the screen and the web status line, copied as one consistent set.
+struct ImuView {
+    Sample s;                                        // latest sample
+    float bias[3];                                   // gyro offset in deg/s, measured at the last zeroing
+    float theta[3];                                  // deg, per-axis integral of (omega - bias) since zeroing
+    float q[4];                                      // gyro-only orientation (w, x, y, z) relative to the zeroing pose
+    float qf[4];                                     // fused orientation: roll/pitch relative to gravity,
+                                                     // yaw relative to the heading at zeroing
+};
+void imu_view(ImuView* out);
+
+// Button events, set by the IMU task and consumed (exchange(false)) by main.cpp.
+// KEY1 = blue front button = M5.BtnA, KEY2 = side button = M5.BtnB.
+extern std::atomic<bool> ev_key1_click, ev_key1_hold, ev_key2_click;
+
+// Zeroing: imu_request_zero() starts a 1 s hold-still measurement of the gyro offset;
+// imu_zero_result() then returns 0 while busy, 1 when done (angles zeroed), 2 if the device moved.
+void imu_request_zero(void);
+int  imu_zero_result(void);
+
+// Polls that found no new accelerometer reading since the previous poll (the value is then
+// repeated). For checking the sampling: should stay near 0 with the accelerometer at 200 Hz.
+uint32_t imu_stale_reads(void);
+
+// True if the accelerometer was confirmed at 200 Hz (ACC_CONF read back as 0xA9). If false the
+// device still works, but at the 100 Hz reset rate polls are more likely to find no new reading.
+bool imu_accel_200hz(void);
+
+// Orient page mode: true = sensor fusion (gyro + gravity from the accelerometer, default),
+// false = gyro-only. Toggled by holding KEY1 on the Orient page; sent to the web page.
+extern std::atomic<bool> ui_orient_fused;
+
+// Recording into a RAM (PSRAM) buffer. Start with a length in seconds, poll until
+// imu_rec_running() is false, then read imu_rec_count() samples from imu_rec_data().
+bool          imu_rec_start(int seconds);            // false if already recording or no buffer
+bool          imu_rec_running(void);
+int           imu_rec_count(void);                   // samples recorded so far
+int           imu_rec_target(void);                  // samples requested
+const Sample* imu_rec_data(void);
+
+// Live ring buffer for the web stream: live_head counts every sample ever written;
+// sample number i is stored at live_ring[i % LIVE_N]. Single writer (IMU task), single reader.
+static constexpr int LIVE_N = 512;                   // 5 s of history at 100 Hz
+extern Sample live_ring[LIVE_N];
+extern std::atomic<uint32_t> live_head;
+
+// ------------------------------------------------------------------------------- main.cpp
+// Start everything and run the user interface; never returns.
+// ESP-IDF calls it from app_main() (main.cpp), Arduino from setup() (the .ino sketch).
+void app_run(void);
+
+// Screen state, published so the web page can follow the device and show recording status.
+extern std::atomic<int> ui_page;                     // 0..3 = Accel, Gyro, Orient, Record
+extern std::atomic<int> ui_dur_s;                    // selected recording length (s)
+extern std::atomic<int> ui_last_rows;                // rows in the last saved file
+extern std::atomic<int> ui_last_run;                 // number of the last saved RUNnn.CSV, 0 = none
+
+// ------------------------------------------------------------------------------- net.cpp
+enum StorageState { STORAGE_OK, STORAGE_RESET, STORAGE_FAILED };
+StorageState storage_init(void);                     // mount the FAT partition at DATA_DIR (see net.cpp)
+bool        net_start(void);                         // start hotspot, web server and live stream; false if any failed
+const char* net_ssid(void);                          // hotspot name, e.g. "IMU-A15734"; "" if the hotspot is not running
+int         net_channel(void);                       // Wi-Fi channel of the hotspot (1, 6 or 11), 0 if not running
+bool        net_web_ok(void);                        // web server and live stream are running
+int         net_ws_clients(void);                    // browsers currently receiving the live stream

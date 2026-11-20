@@ -1,0 +1,15 @@
+# Board settings and versions for arduino-cli (the Arduino IDE uses its Tools menu instead;
+# see the comment at the top of sticks3_imu_logger.ino).
+#   arduino-cli compile .                        uses default_fqbn below
+#   arduino-cli compile --profile sticks3 .      also pins the core and library versions
+default_fqbn: esp32:esp32:esp32s3:CDCOnBoot=cdc,USBMode=hwcdc,CPUFreq=240,FlashSize=8M,PartitionScheme=custom,PSRAM=opi
+
+profiles:
+  sticks3:
+    fqbn: esp32:esp32:esp32s3:CDCOnBoot=cdc,USBMode=hwcdc,CPUFreq=240,FlashSize=8M,PartitionScheme=custom,PSRAM=opi
+    platforms:
+      - platform: esp32:esp32 (3.3.0)
+        platform_index_url: https://espressif.github.io/arduino-esp32/package_esp32_index.json
+    libraries:
+      - M5Unified (0.3.0)
+      - M5GFX (0.3.0)

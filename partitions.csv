@@ -1,0 +1,6 @@
+# StickS3, 8 MB flash: 3 MB app, ~4.9 MB FAT storage for recordings
+# Name,   Type, SubType, Offset,   Size
+nvs,      data, nvs,     0x9000,   0x6000
+phy_init, data, phy,     0xf000,   0x1000
+factory,  app,  factory, 0x10000,  0x300000
+storage,  data, fat,     0x310000, 0x4F0000

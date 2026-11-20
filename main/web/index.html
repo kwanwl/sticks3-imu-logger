@@ -1,0 +1,481 @@
+<!doctype html>
+<!--
+  StickS3 IMU web page, served by the StickS3 at http://192.168.4.1 (see main/net.cpp).
+  Built into the firmware: rebuild and flash after editing.
+  Self-contained (no internet on the hotspot): no external scripts, fonts or images.
+
+  Views: Accel, Gyro, Orient, Record follow the StickS3's pages 1-4 when "Follow StickS3" is
+  ticked; Live (both graphs) is a browser-only view.
+  Data: WebSocket /ws sends, every 50 ms, a "#S,..." status line plus 100 Hz sample lines
+  (format documented in net.cpp, live_task).
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StickS3 IMU</title>
+<style>
+  :root { --bg:#fff; --fg:#1d1d1f; --muted:#6e6e73; --line:#d2d2d7; --card:#f5f5f7; --accent:#1f7ae0;
+          --x:#d62728; --y:#2ca02c; --z:#1f9fd6; --body:#8e8e93; --screen:#e8eef7; --btn:#1e88e5; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#111; --fg:#f2f2f2; --muted:#a1a1a6; --line:#3a3a3c; --card:#1c1c1e; --body:#6e6e73; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:16px; font:15px/1.4 system-ui, sans-serif; background:var(--bg); color:var(--fg); }
+  h1 { font-size:20px; margin:0 0 8px; }
+  .tabs { display:flex; gap:6px; margin-bottom:8px; flex-wrap:wrap; }
+  .tabs button { flex:1 1 0; min-width:64px; padding:8px 4px; border:1px solid var(--line); background:var(--card);
+                 color:var(--fg); border-radius:8px; font-size:14px; }
+  .tabs button.on { border-color:var(--accent); font-weight:600; }
+  .tabs button.dev::after { content:" \25CF"; color:var(--accent); }
+  section { display:none; } section.on { display:block; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px; margin-bottom:12px; }
+  .row { display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap; }
+  .muted { color:var(--muted); font-size:13px; }
+  canvas { width:100%; display:block; touch-action:none; }
+  canvas.graph { height:180px; } canvas.three { height:280px; } canvas.dials { height:170px; }
+  .legend span { margin-right:12px; font-variant-numeric:tabular-nums; }
+  .x { color:var(--x); } .y { color:var(--y); } .z { color:var(--z); }
+  .big { font-size:22px; font-variant-numeric:tabular-nums; }
+  table { width:100%; border-collapse:collapse; }
+  td, th { padding:8px 4px; border-bottom:1px solid var(--line); text-align:left; }
+  a.btn, button.btn { padding:6px 10px; border-radius:6px; border:1px solid var(--line);
+                      background:var(--bg); color:var(--fg); text-decoration:none; font-size:14px; }
+  .bar { height:14px; background:var(--line); border-radius:7px; overflow:hidden; }
+  .bar > div { height:100%; width:0; background:#d62728; }
+  label { font-size:14px; }
+</style>
+</head>
+<body>
+<h1>StickS3 IMU</h1>
+<div class="row card">
+  <span id="status" class="muted">Connecting...</span>
+  <label><input type="checkbox" id="follow" checked> Follow StickS3</label>
+</div>
+<div class="tabs" id="tabs">
+  <button data-v="0">Accel</button><button data-v="1">Gyro</button><button data-v="2">Orient</button>
+  <button data-v="3">Record</button><button data-v="4">Live</button>
+</div>
+<div class="row" id="tools" style="margin-bottom:12px">
+  <span class="muted" id="hint"></span>
+  <span>
+    <button class="btn" id="pause">Pause</button>
+    <button class="btn" id="save">Save CSV</button>
+  </span>
+</div>
+
+<!-- Accel view (StickS3 page 1) -->
+<section id="v0">
+  <div class="card">
+    <div class="row"><b>Acceleration vector</b><span class="big" id="amag">|a| = –</span></div>
+    <canvas class="three" id="c3a"></canvas>
+    <p class="muted">The arrow is the measured acceleration in the StickS3's own axes. Lying still it points up at about 1 g: the accelerometer feels the table pushing up, not gravity pulling down. Drag to turn the view.</p>
+  </div>
+  <div class="card">
+    <div class="row"><b>Acceleration (g)</b>
+      <span class="legend"><span class="x" id="ax0">x</span><span class="y" id="ay0">y</span><span class="z" id="az0">z</span></span></div>
+    <canvas class="graph" id="gA0"></canvas>
+  </div>
+</section>
+
+<!-- Gyro view (StickS3 page 2) -->
+<section id="v1">
+  <div class="card">
+    <div class="row"><b>Angle since KEY1 (&deg;)</b><span class="muted" id="zero1"></span></div>
+    <canvas class="dials" id="dials"></canvas>
+    <p class="muted">&theta; = &int;&omega; dt about each axis, worked out separately. Correct when the rotation is mainly about one axis; compare with the Orient view.</p>
+  </div>
+  <div class="card">
+    <div class="row"><b>Angular velocity (&deg;/s, offset removed)</b>
+      <span class="legend"><span class="x" id="wx1">x</span><span class="y" id="wy1">y</span><span class="z" id="wz1">z</span></span></div>
+    <canvas class="graph" id="gG1"></canvas>
+  </div>
+</section>
+
+<!-- Orient view (StickS3 page 3) -->
+<section id="v2">
+  <div class="card">
+    <div class="row"><b id="orientTitle">Orientation</b><span class="muted" id="zero2"></span></div>
+    <canvas class="three" id="c3o"></canvas>
+    <div class="row legend big">
+      <span class="x" id="roll">Roll –</span><span class="y" id="pitch">Pitch –</span><span class="z" id="yaw">Yaw –</span>
+    </div>
+    <p class="muted" id="orientNote"></p>
+  </div>
+</section>
+
+<!-- Record view (StickS3 page 4) -->
+<section id="v3">
+  <div class="card">
+    <div class="row"><b>Recorder</b><span id="recstate" class="muted"></span></div>
+    <div class="bar" style="margin:10px 0"><div id="recbar"></div></div>
+    <div class="muted">Press KEY1 (blue) on the StickS3 to record; hold KEY1 to change the length.</div>
+    <div class="muted" id="stale" style="margin-top:6px"></div>
+  </div>
+  <div class="card">
+    <div class="row"><b>Saved runs</b><button class="btn" onclick="loadFiles()">Refresh</button></div>
+    <table><tbody id="files"><tr><td class="muted">Loading...</td></tr></tbody></table>
+  </div>
+  <p class="muted">Columns: t_ms, ax_g, ay_g, az_g, wx_dps, wy_dps, wz_dps.</p>
+</section>
+
+<!-- Live view (browser only): both graphs together -->
+<section id="v4">
+  <div class="card">
+    <div class="row"><b>Acceleration (g)</b>
+      <span class="legend"><span class="x" id="ax4">x</span><span class="y" id="ay4">y</span><span class="z" id="az4">z</span></span></div>
+    <canvas class="graph" id="gA4"></canvas>
+  </div>
+  <div class="card">
+    <div class="row"><b>Angular velocity (&deg;/s)</b>
+      <span class="legend"><span class="x" id="wx4">x</span><span class="y" id="wy4">y</span><span class="z" id="wz4">z</span></span></div>
+    <canvas class="graph" id="gG4"></canvas>
+  </div>
+</section>
+
+<p class="muted" id="foot">Last 10 s at 100 Hz. Save CSV downloads what is on the graphs (press Pause first to freeze a moment); columns as in recordings.</p>
+
+<script>
+// ---------------------------------------------------------------- settings
+// How the BMI270 axes sit in the case. Check with page 1: stand the StickS3 on its end
+// with the USB-C port DOWN; the axis that reads about +1 g is the long axis pointing
+// away from USB. Set LONG to that axis ('x' or 'y') and LONG_SIGN to +1 (or -1 if it
+// reads -1 g). The screen is on the +Z face when Z reads +1 g lying screen-up.
+const MODEL = { LONG: 'y', LONG_SIGN: +1, SCREEN_SIGN: +1, L: 48, W: 24, T: 14 };
+const WINDOW_MS = 10000;
+
+// ---------------------------------------------------------------- state
+// data: rows [t_ms, ax, ay, az, wx, wy, wz] for the last WINDOW_MS (raw, gyro offset included)
+// S: latest status line, parsed in onStatus(); view: index of the visible view (0..4)
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const $ = id => document.getElementById(id);
+let data = [], paused = false, S = null, view = 0, lastFile = null;
+const cam = { az: -0.6, el: 0.45 };        // shared 3-D camera (radians), changed by dragging
+
+// ---------------------------------------------------------------- views
+// Show view v (0 Accel, 1 Gyro, 2 Orient, 3 Record, 4 Live).
+function setView(v) {
+  view = v;
+  for (let i = 0; i < 5; i++) $('v' + i).classList.toggle('on', i === v);
+  document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('on', +b.dataset.v === v));
+  $('tools').style.display = v === 3 ? 'none' : 'flex';
+  $('foot').style.display = v === 3 || v === 2 ? 'none' : 'block';
+  if (v === 3) loadFiles();
+}
+document.querySelectorAll('#tabs button').forEach(b => b.onclick = () => {
+  $('follow').checked = false;
+  setView(+b.dataset.v);
+});
+$('follow').onchange = () => { if ($('follow').checked && S) setView(S.page); };
+$('pause').onclick = () => { paused = !paused; $('pause').textContent = paused ? 'Resume' : 'Pause'; };
+$('save').onclick = saveView;
+
+// ---------------------------------------------------------------- stream
+// Connect to the live stream; reconnect after a second if the connection drops.
+function connect() {
+  const ws = new WebSocket('ws://' + location.host + '/ws');
+  ws.onopen = () => $('status').textContent = 'Connected';
+  ws.onclose = () => { $('status').textContent = 'Disconnected - retrying...'; setTimeout(connect, 1000); };
+  ws.onmessage = ev => {
+    for (const line of ev.data.trim().split('\n')) {
+      if (line.startsWith('#S,')) { onStatus(line.slice(3).split(',')); continue; }
+      if (paused) continue;
+      const v = line.split(',').map(Number);
+      if (v.length === 7) data.push(v);
+    }
+    const tEnd = data.length ? data[data.length - 1][0] : 0;
+    while (data.length && data[0][0] < tEnd - WINDOW_MS) data.shift();
+  };
+}
+
+// Parse a status line (fields after "#S,"); see net.cpp live_task for the format.
+// When following, switch to the view matching the StickS3 page (0..3).
+function onStatus(f) {
+  const n = i => Number(f[i]);
+  const prev = S;
+  S = { page: n(0), zero: n(1), recOn: n(2), recN: n(3), recTarget: n(4), dur: n(5),
+        lastRows: n(6), lastFile: f[7], bias: [n(8), n(9), n(10)], theta: [n(11), n(12), n(13)],
+        q: [n(14), n(15), n(16), n(17)], stale: n(18), acc200: n(19) === 1, fused: n(20) === 1 };
+  $('status').textContent = paused ? 'Paused' : 'Live';
+  document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('dev', +b.dataset.v === S.page));
+  if ($('follow').checked && (!prev || prev.page !== S.page || view !== S.page)) setView(S.page);
+  const z = S.zero === 0 ? 'Hold still... zeroing' : S.zero === 2 ? 'Moved - press KEY1 again' : 'KEY1 (blue) re-zeroes';
+  $('zero1').textContent = z; $('zero2').textContent = z;
+  if (S.lastFile !== lastFile) { lastFile = S.lastFile; if (view === 3) loadFiles(); }
+}
+
+// ---------------------------------------------------------------- 2-D graphs
+// Line graph of data columns `cols` (indices into a row) over the last WINDOW_MS,
+// optionally minus an offset per column. Auto-scales the y axis; time axis in seconds.
+function plot(canvas, cols, offset) {
+  const dpr = window.devicePixelRatio || 1, W = canvas.clientWidth, H = canvas.clientHeight;
+  if (canvas.width !== W * dpr || canvas.height !== H * dpr) { canvas.width = W * dpr; canvas.height = H * dpr; }
+  const c = canvas.getContext('2d');
+  c.setTransform(dpr, 0, 0, dpr, 0, 0);
+  c.clearRect(0, 0, W, H);
+  if (data.length < 2) return;
+  const val = (r, k, i) => r[k] - (offset ? offset[i] : 0);
+
+  const L = 44, B = 18, pw = W - L - 4, ph = H - B - 4;
+  const t1 = data[data.length - 1][0], t0 = t1 - WINDOW_MS;
+  let lo = Infinity, hi = -Infinity;
+  for (const r of data) cols.forEach((k, i) => { lo = Math.min(lo, val(r, k, i)); hi = Math.max(hi, val(r, k, i)); });
+  const pad = Math.max((hi - lo) * 0.1, 0.05); lo -= pad; hi += pad;
+  const X = t => L + (t - t0) / WINDOW_MS * pw, Y = v => 4 + (hi - v) / (hi - lo) * ph;
+
+  c.strokeStyle = css('--line'); c.fillStyle = css('--muted'); c.font = '11px system-ui'; c.lineWidth = 1;
+  for (let i = 0; i <= 4; i++) {
+    const v = lo + (hi - lo) * i / 4, y = Y(v);
+    c.beginPath(); c.moveTo(L, y); c.lineTo(W - 4, y); c.stroke();
+    const txt = v.toFixed(Math.abs(hi - lo) < 5 ? 2 : 0);
+    c.fillText(/^-0(\.0+)?$/.test(txt) ? txt.slice(1) : txt, 2, y + 4);
+  }
+  for (let s = Math.ceil(t0 / 1000); s * 1000 <= t1; s += 2)
+    c.fillText(((s * 1000 - t1) / 1000).toFixed(0) + 's', X(s * 1000) - 8, H - 4);
+  const colours = [css('--x'), css('--y'), css('--z')];
+  cols.forEach((k, i) => {
+    c.strokeStyle = colours[i]; c.lineWidth = 1.5; c.beginPath();
+    data.forEach((r, j) => { const x = X(r[0]), y = Y(val(r, k, i)); j ? c.lineTo(x, y) : c.moveTo(x, y); });
+    c.stroke();
+  });
+}
+
+// ---------------------------------------------------------------- 3-D helpers
+// Minimal 3-D drawing on a 2-D canvas: orthographic projection, back-face culling and flat
+// shading. World axes: x right, y away, z up. The camera turns about z (cam.az) and tilts
+// (cam.el).
+const rotq = (q, v) => {                       // rotate vector v by unit quaternion q = [w,x,y,z]
+  const [w, x, y, z] = q, [vx, vy, vz] = v;
+  const tx = 2 * (y * vz - z * vy), ty = 2 * (z * vx - x * vz), tz = 2 * (x * vy - y * vx);
+  return [vx + w * tx + y * tz - z * ty, vy + w * ty + z * tx - x * tz, vz + w * tz + x * ty - y * tx];
+};
+function project(p, W, H, scale) {               // world (z up) -> screen, plus depth (bigger = farther)
+  const ca = Math.cos(cam.az), sa = Math.sin(cam.az), ce = Math.cos(cam.el), se = Math.sin(cam.el);
+  const x1 = p[0] * ca - p[1] * sa, y1 = p[0] * sa + p[1] * ca, z1 = p[2];
+  return { x: W / 2 + scale * x1, y: H / 2 - scale * (z1 * ce + y1 * se), d: y1 * ce - z1 * se };
+}
+function setupCanvas(canvas) {
+  const dpr = window.devicePixelRatio || 1, W = canvas.clientWidth, H = canvas.clientHeight;
+  if (canvas.width !== W * dpr || canvas.height !== H * dpr) { canvas.width = W * dpr; canvas.height = H * dpr; }
+  const c = canvas.getContext('2d');
+  c.setTransform(dpr, 0, 0, dpr, 0, 0);
+  c.clearRect(0, 0, W, H);
+  return { c, W, H };
+}
+
+// StickS3 box in body (IMU) coordinates: long axis per MODEL, screen on the Z face.
+// along(long, short, thick) maps case directions to body x, y, z.
+function bodyAxes() {
+  const lx = MODEL.LONG === 'x';
+  const half = [lx ? MODEL.L / 2 : MODEL.W / 2, lx ? MODEL.W / 2 : MODEL.L / 2, MODEL.T / 2];
+  const along = (u, v, w) => lx ? [u, v, w] : [v, u, w];     // (long, short, thick) -> body xyz
+  return { half, along };
+}
+// Draw the StickS3 rotated by quaternion q (body -> world), with screen and blue KEY1.
+function drawStick(c, W, H, scale, q, alpha) {
+  const { half, along } = bodyAxes();
+  const [hx, hy, hz] = half, s = MODEL.LONG_SIGN, sc = MODEL.SCREEN_SIGN;
+  const P = v => project(rotq(q, v), W, H, scale);
+  const faces = [
+    { n: [0, 0, sc], v: [[-hx, -hy, sc * hz], [hx, -hy, sc * hz], [hx, hy, sc * hz], [-hx, hy, sc * hz]], top: true },
+    { n: [0, 0, -sc], v: [[-hx, -hy, -sc * hz], [-hx, hy, -sc * hz], [hx, hy, -sc * hz], [hx, -hy, -sc * hz]] },
+    { n: [1, 0, 0], v: [[hx, -hy, -hz], [hx, hy, -hz], [hx, hy, hz], [hx, -hy, hz]] },
+    { n: [-1, 0, 0], v: [[-hx, -hy, -hz], [-hx, -hy, hz], [-hx, hy, hz], [-hx, hy, -hz]] },
+    { n: [0, 1, 0], v: [[-hx, hy, -hz], [-hx, hy, hz], [hx, hy, hz], [hx, hy, -hz]] },
+    { n: [0, -1, 0], v: [[-hx, -hy, -hz], [hx, -hy, -hz], [hx, -hy, hz], [-hx, -hy, hz]] },
+  ];
+  const light = [0.4, -0.5, 0.75];
+  c.globalAlpha = alpha;
+  for (const f of faces) {
+    const n = rotq(q, f.n);
+    const nd = project(n, 0, 0, 1).d - project([0, 0, 0], 0, 0, 1).d;
+    if (nd >= 0) continue;                                   // facing away
+    const pts = f.v.map(P);
+    const b = 0.7 + 0.3 * Math.max(0, n[0] * light[0] + n[1] * light[1] + n[2] * light[2]);
+    c.fillStyle = css('--body'); c.beginPath();
+    pts.forEach((p, i) => i ? c.lineTo(p.x, p.y) : c.moveTo(p.x, p.y)); c.closePath(); c.fill();
+    c.fillStyle = `rgba(0,0,0,${(1 - b).toFixed(2)})`; c.fill();
+    if (f.top) {                                             // screen and blue KEY1 button
+      const z = sc * (hz + 0.1);
+      const rect = (u0, u1, w0, w1, colour) => {
+        const q4 = [[u0, w0], [u1, w0], [u1, w1], [u0, w1]].map(([u, w]) => P(along(s * u, w, z)));
+        c.fillStyle = colour; c.beginPath();
+        q4.forEach((p, i) => i ? c.lineTo(p.x, p.y) : c.moveTo(p.x, p.y)); c.closePath(); c.fill();
+      };
+      rect(-6, 20, -9, 9, css('--screen'));                 // screen toward the far end
+      rect(-17, -13, -5, 5, css('--btn'));                  // KEY1 toward the USB end
+    }
+  }
+  c.globalAlpha = 1;
+}
+function arrow(c, a, b, colour, width, label) {
+  c.strokeStyle = colour; c.fillStyle = colour; c.lineWidth = width;
+  c.beginPath(); c.moveTo(a.x, a.y); c.lineTo(b.x, b.y); c.stroke();
+  const ang = Math.atan2(b.y - a.y, b.x - a.x), h = 6 + width * 2;
+  c.beginPath(); c.moveTo(b.x, b.y);
+  c.lineTo(b.x - h * Math.cos(ang - 0.4), b.y - h * Math.sin(ang - 0.4));
+  c.lineTo(b.x - h * Math.cos(ang + 0.4), b.y - h * Math.sin(ang + 0.4)); c.closePath(); c.fill();
+  if (label) { c.font = '600 13px system-ui'; c.fillText(label, b.x + 6, b.y - 4); }
+}
+function drawAxes(c, W, H, scale, q, len) {
+  const o = project(rotq(q, [0, 0, 0]), W, H, scale);
+  [['X', [len, 0, 0], '--x'], ['Y', [0, len, 0], '--y'], ['Z', [0, 0, len], '--z']].forEach(([n, v, col]) =>
+    arrow(c, o, project(rotq(q, v), W, H, scale), css(col), 1.5, n));
+}
+
+// Page 1: StickS3 fixed, acceleration vector in its own axes
+function drawAccel3D() {
+  const { c, W, H } = setupCanvas($('c3a'));
+  const scale = Math.min(W, H) / 110, I = [1, 0, 0, 0];
+  drawStick(c, W, H, scale, I, 0.35);
+  drawAxes(c, W, H, scale, I, 34);
+  if (!data.length) return;
+  const r = data[data.length - 1], G = 30;                 // 1 g = 30 model units
+  const tip = [r[1] * G, r[2] * G, r[3] * G];
+  arrow(c, project([0, 0, 0], W, H, scale), project(tip, W, H, scale), css('--fg'), 3.5, 'a');
+  $('amag').textContent = '|a| = ' + Math.hypot(r[1], r[2], r[3]).toFixed(3) + ' g';
+}
+
+// Page 3: StickS3 turned by the device quaternion, reference square at the KEY1 pose
+function drawOrient3D() {
+  const { c, W, H } = setupCanvas($('c3o'));
+  const scale = Math.min(W, H) / 110, q = S ? S.q : [1, 0, 0, 0];
+  const r = 36, sq = [[-r, -r, -16], [r, -r, -16], [r, r, -16], [-r, r, -16]].map(p => project(p, W, H, scale));
+  c.strokeStyle = css('--line'); c.lineWidth = 1; c.beginPath();
+  sq.forEach((p, i) => i ? c.lineTo(p.x, p.y) : c.moveTo(p.x, p.y)); c.closePath(); c.stroke();
+  drawStick(c, W, H, scale, q, 1);
+  drawAxes(c, W, H, scale, q, 34);
+  const [w, x, y, z] = q, d = 180 / Math.PI;
+  const roll = Math.atan2(2 * (w * x + y * z), 1 - 2 * (x * x + y * y)) * d;
+  const pitch = Math.asin(Math.max(-1, Math.min(1, 2 * (w * y - z * x)))) * d;
+  const yaw = Math.atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z)) * d;
+  $('roll').textContent = 'Roll ' + roll.toFixed(1) + '°';
+  $('pitch').textContent = 'Pitch ' + pitch.toFixed(1) + '°';
+  $('yaw').textContent = 'Yaw ' + yaw.toFixed(1) + '°';
+}
+
+// Page 2: three dials for theta x, y, z (positive = counter-clockwise, right-hand rule)
+function drawDials() {
+  const { c, W, H } = setupCanvas($('dials'));
+  const th = S ? S.theta : [0, 0, 0], cols = ['--x', '--y', '--z'], names = ['θx', 'θy', 'θz'];
+  const R = Math.min(W / 6 - 8, H / 2 - 22);
+  th.forEach((t, i) => {
+    const cx = W * (i + 0.5) / 3, cy = H / 2 - 8;
+    c.strokeStyle = css('--line'); c.lineWidth = 2; c.beginPath(); c.arc(cx, cy, R, 0, 2 * Math.PI); c.stroke();
+    for (let k = 0; k < 12; k++) {
+      const a = k * Math.PI / 6, r0 = k % 3 ? R - 5 : R - 10;
+      c.beginPath(); c.moveTo(cx + r0 * Math.sin(a), cy - r0 * Math.cos(a));
+      c.lineTo(cx + R * Math.sin(a), cy - R * Math.cos(a)); c.stroke();
+    }
+    const a = -t * Math.PI / 180;                            // 0 deg at top, + counter-clockwise
+    c.strokeStyle = css(cols[i]); c.lineWidth = 4; c.beginPath(); c.moveTo(cx, cy);
+    c.lineTo(cx + (R - 6) * Math.sin(a), cy - (R - 6) * Math.cos(a)); c.stroke();
+    c.fillStyle = css(cols[i]); c.beginPath(); c.arc(cx, cy, 4, 0, 2 * Math.PI); c.fill();
+    c.font = '600 15px system-ui'; c.textAlign = 'center';
+    c.fillText(names[i] + ' ' + t.toFixed(1) + '°', cx, H - 4);
+    c.textAlign = 'start';
+  });
+}
+
+// Drag on any 3-D view to turn the camera
+for (const id of ['c3a', 'c3o']) {
+  const cv = $(id); let drag = null;
+  cv.onpointerdown = e => { drag = [e.clientX, e.clientY, cam.az, cam.el]; cv.setPointerCapture(e.pointerId); };
+  cv.onpointermove = e => {
+    if (!drag) return;
+    cam.az = drag[2] + (e.clientX - drag[0]) * 0.01;
+    cam.el = Math.max(-1.4, Math.min(1.4, drag[3] + (e.clientY - drag[1]) * 0.01));
+  };
+  cv.onpointerup = () => drag = null;
+}
+
+// ---------------------------------------------------------------- frame loop
+// Redraw only the visible view, once per animation frame.
+function legend(ids, k0, digits, offset) {
+  if (!data.length) return;
+  const r = data[data.length - 1];
+  ids.forEach((id, i) => $(id).textContent = 'xyz'[i] + ' ' + (r[k0 + i] - (offset ? offset[i] : 0)).toFixed(digits));
+}
+function frame() {
+  if (view === 0) { drawAccel3D(); plot($('gA0'), [1, 2, 3]); legend(['ax0', 'ay0', 'az0'], 1, 3); }
+  if (view === 1) { drawDials(); const b = S ? S.bias : null; plot($('gG1'), [4, 5, 6], b); legend(['wx1', 'wy1', 'wz1'], 4, 1, b); }
+  if (view === 2) {
+    drawOrient3D();
+    // Explain what the model is relative to, for the Orient page's current mode.
+    const fused = !S || S.fused;
+    $('orientTitle').textContent = fused ? 'Orientation (sensor fusion)' : 'Orientation (gyro only)';
+    $('orientNote').textContent = fused
+      ? 'Gyro and accelerometer combined: the accelerometer\u2019s gravity direction keeps roll and pitch true, so the model shows which side is really up and the grey square is level ground. Yaw (heading) has no reference without a compass: it is measured from the heading when KEY1 was pressed and slowly drifts. While the device accelerates, only the gyro is used. Hold KEY1 on the StickS3 to switch to gyro only. Drag to turn the view.'
+      : 'Gyro only: every rotation since KEY1 is combined in the right order (quaternion), but nothing corrects the slow drift. The grey square is the StickS3\u2019s pose when KEY1 was pressed. Hold KEY1 on the StickS3 to switch back to sensor fusion. Drag to turn the view.';
+  }
+  if (view === 3 && S) {
+    $('recbar').style.width = (S.recOn ? 100 * S.recN / Math.max(1, S.recTarget) : 0) + '%';
+    $('recstate').textContent = S.recOn ? `Recording ${(S.recN / 100).toFixed(1)} / ${S.dur} s`
+      : `Length ${S.dur} s` + (S.lastFile ? ` · last: ${S.lastFile} (${S.lastRows} rows)` : '');
+    // Sampling check: polls since power-on without new accelerometer data (the previous value
+    // is then repeated), and whether the accelerometer was confirmed at 200 Hz.
+    $('stale').textContent = `Sampling check: ${S.stale} polls without new accelerometer data since power-on`
+      + (S.acc200 ? '' : ' \u2014 warning: accelerometer not set to 200 Hz');
+  }
+  if (view === 4) {
+    plot($('gA4'), [1, 2, 3]); plot($('gG4'), [4, 5, 6]);
+    legend(['ax4', 'ay4', 'az4'], 1, 3); legend(['wx4', 'wy4', 'wz4'], 4, 1);
+  }
+  $('hint').textContent = view === 4 ? 'Live view (browser only)'
+    : $('follow').checked ? 'Following the StickS3 (KEY2)' : 'Tick "Follow StickS3" to follow KEY2';
+  requestAnimationFrame(frame);
+}
+
+// ---------------------------------------------------------------- Save CSV
+// Download the samples on the graphs (last 10 s), same columns as recordings,
+// with t_ms starting at 0. Named with the phone/laptop clock.
+function saveView() {
+  if (!data.length) { flash('Nothing to save yet'); return; }
+  const t0 = data[0][0];
+  const rows = ['t_ms,ax_g,ay_g,az_g,wx_dps,wy_dps,wz_dps'];
+  for (const r of data) rows.push([r[0] - t0, ...r.slice(1)].join(','));
+  const d = new Date(), p = n => String(n).padStart(2, '0');
+  const name = `live_${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}.csv`;
+  const url = URL.createObjectURL(new Blob([rows.join('\n') + '\n'], {type: 'text/csv'}));
+  const a = document.createElement('a');
+  a.href = url; a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  flash(`Saved ${name} (${data.length} rows)`);
+}
+function flash(msg) {
+  const st = $('status'), old = st.textContent;
+  st.textContent = msg;
+  setTimeout(() => { if (st.textContent === msg) st.textContent = old; }, 3000);
+}
+
+// ---------------------------------------------------------------- recordings
+// List the RUNnn.CSV files on the StickS3 with Download and Delete buttons.
+async function loadFiles() {
+  const tb = $('files');
+  try {
+    const files = (await (await fetch('/api/files')).json()).sort((a, b) => a.name.localeCompare(b.name));
+    tb.innerHTML = files.length ? '' : '<tr><td class="muted">No recordings yet</td></tr>';
+    for (const f of files) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${f.name}</td><td class="muted">${(f.size / 1024).toFixed(1)} KB</td>
+        <td><a class="btn" href="/dl?f=${f.name}" download="${f.name}">Download</a></td>
+        <td><button class="btn">Delete</button></td>`;
+      tr.querySelector('button').onclick = async () => {
+        if (!confirm(`Delete ${f.name} from the StickS3?`)) return;
+        await fetch('/del?f=' + f.name, {method: 'POST'});
+        loadFiles();
+      };
+      tb.appendChild(tr);
+    }
+  } catch (e) {
+    tb.innerHTML = '<tr><td class="muted">Could not load the list</td></tr>';
+  }
+}
+
+setView(0);
+connect();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
