@@ -4,7 +4,7 @@
 The ESP-IDF project in main/ is the single source of truth. The Arduino IDE can only
 compile files inside the sketch folder and cannot embed a file into the firmware, so this
 script:
-  1. copies app.h, imu.cpp, net.cpp and main.cpp from main/ to arduino/sticks3_imu_logger/,
+  1. copies app.h, imu.cpp, net.cpp, main.cpp and usb.cpp from main/ to arduino/sticks3_imu_logger/,
   2. copies partitions.csv (same flash layout as the ESP-IDF build),
   3. turns main/web/index.html into index_html.h (one string constant, INDEX_HTML).
 
@@ -19,7 +19,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 SRC = ROOT / "main"
 SKETCH = ROOT / "arduino" / "sticks3_imu_logger"
 
-COPIED = ["app.h", "imu.cpp", "net.cpp", "main.cpp"]
+COPIED = ["app.h", "imu.cpp", "net.cpp", "main.cpp", "usb.cpp"]
 DELIM = "html_page"  # raw-string delimiter; must not occur in index.html as ')html_page"'
 
 

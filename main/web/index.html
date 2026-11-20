@@ -1,13 +1,17 @@
 <!doctype html>
 <!--
-  StickS3 IMU web page, served by the StickS3 at http://192.168.4.1 (see main/net.cpp).
-  Built into the firmware: rebuild and flash after editing.
+  StickS3 IMU web page. The same page works two ways:
+    Wi-Fi: served by the StickS3 at http://192.168.4.1 (main/net.cpp); data over a WebSocket.
+    USB:   opened from GitHub Pages (https://kwanwl.github.io/sticks3-imu-logger/usb/) in
+           Chrome or Edge; "Connect USB" talks to the StickS3 with Web Serial (main/usb.cpp).
+  Built into the firmware: rebuild and flash after editing (the USB copy on GitHub Pages
+  updates when the repository is pushed).
   Self-contained (no internet on the hotspot): no external scripts, fonts or images.
 
   Views: Accel, Gyro, Orient, Record follow the StickS3's pages 1-4 when "Follow StickS3" is
   ticked; Live (both graphs) is a browser-only view.
-  Data: WebSocket /ws sends, every 50 ms, a "#S,..." status line plus 100 Hz sample lines
-  (format documented in net.cpp, live_task).
+  Data: every 100 ms a status line plus samples thinned to 25 Hz (recordings keep 100 Hz).
+  Wi-Fi lines: "#S,..." and plain samples; USB lines: "@S,..." and "@L,..." (net.cpp, usb.cpp).
 -->
 <html lang="en">
 <head>
@@ -49,7 +53,9 @@
 <body>
 <h1>StickS3 IMU</h1>
 <div class="row card">
-  <span id="status" class="muted">Connecting...</span>
+  <span><span id="status" class="muted">Connecting...</span>
+    <button class="btn" id="usbBtn" hidden>Connect USB</button>
+    <span id="bat" class="muted"></span></span>
   <label><input type="checkbox" id="follow" checked> Follow StickS3</label>
 </div>
 <div class="tabs" id="tabs">
@@ -133,7 +139,7 @@
   </div>
 </section>
 
-<p class="muted" id="foot">Last 10 s at 100 Hz. Save CSV downloads what is on the graphs (press Pause first to freeze a moment); columns as in recordings.</p>
+<p class="muted" id="foot">Last 10 s at 25 Hz (recordings keep 100 Hz). Save CSV downloads what is on the graphs (press Pause first to freeze a moment); columns as in recordings.</p>
 
 <script>
 // ---------------------------------------------------------------- settings
@@ -171,21 +177,131 @@ $('pause').onclick = () => { paused = !paused; $('pause').textContent = paused ?
 $('save').onclick = saveView;
 
 // ---------------------------------------------------------------- stream
-// Connect to the live stream; reconnect after a second if the connection drops.
+// Opened from the StickS3 itself (http://192.168.4.1) -> Wi-Fi; from GitHub Pages (https) or
+// with ?usb -> USB via Web Serial.
+const USB = location.protocol !== 'http:' || location.search.includes('usb');
+
+// One line of the live stream, from either transport.
+function streamLine(line) {
+  if (line.startsWith('#S,') || line.startsWith('@S,')) { onStatus(line.slice(3).split(',')); return; }
+  if (line.startsWith('@L,')) line = line.slice(3);
+  else if (USB) return;                              // other USB lines: replies or log text
+  if (paused) return;
+  const v = line.split(',').map(Number);
+  if (v.length === 7 && v.every(Number.isFinite)) data.push(v);
+}
+function trimWindow() {
+  const tEnd = data.length ? data[data.length - 1][0] : 0;
+  while (data.length && data[0][0] < tEnd - WINDOW_MS) data.shift();
+}
+
+// Wi-Fi: WebSocket; reconnect after a second if the connection drops.
 function connect() {
   const ws = new WebSocket('ws://' + location.host + '/ws');
   ws.onopen = () => $('status').textContent = 'Connected';
   ws.onclose = () => { $('status').textContent = 'Disconnected - retrying...'; setTimeout(connect, 1000); };
-  ws.onmessage = ev => {
-    for (const line of ev.data.trim().split('\n')) {
-      if (line.startsWith('#S,')) { onStatus(line.slice(3).split(',')); continue; }
-      if (paused) continue;
-      const v = line.split(',').map(Number);
-      if (v.length === 7) data.push(v);
+  ws.onmessage = ev => { ev.data.trim().split('\n').forEach(streamLine); trimWindow(); };
+}
+
+// USB: Web Serial (Chrome / Edge on a computer). Protocol in main/usb.cpp.
+const usb = { port: null, writer: null, buf: '', waiters: [], files: [], dl: null, keep: null };
+
+async function usbConnect() {
+  if (!('serial' in navigator)) {
+    $('status').textContent = 'USB needs Chrome or Edge on a computer';
+    return;
+  }
+  try {
+    usb.port = await navigator.serial.requestPort({ filters: [{ usbVendorId: 0x303a }] });  // Espressif
+    // Open as is: do not change the DTR/RTS signals afterwards; switching them off resets
+    // the ESP32-S3 (the auto-reset that flashers use) and would interrupt a recording.
+    await usb.port.open({ baudRate: 115200 });
+  } catch (e) {
+    usb.port = null;
+    $('status').textContent = 'Not connected (' + e.message + ')';
+    return;
+  }
+  usb.writer = usb.port.writable.getWriter();
+  $('usbBtn').hidden = true;
+  $('status').textContent = 'Connected over USB';
+  usbRead();
+  usbSend('LIVE 1');
+  usb.keep = setInterval(() => usbSend('LIVE 1'), 3000);   // the StickS3 stops after 10 s of silence
+  if (view === 3) loadFiles();
+}
+
+async function usbSend(cmd) {
+  try { if (usb.writer) await usb.writer.write(new TextEncoder().encode(cmd + '\n')); } catch (e) {}
+}
+
+// Send a command that has a reply (LIST, GET, DEL); replies come back in order.
+function usbRequest(cmd, timeoutMs = 5000) {
+  return new Promise((resolve, reject) => {
+    const w = { resolve, reject };
+    w.timer = setTimeout(() => { usb.waiters = usb.waiters.filter(x => x !== w); reject(new Error('no reply')); }, timeoutMs);
+    usb.waiters.push(w);
+    usbSend(cmd);
+  });
+}
+function usbReply(ok, value) {
+  const w = usb.waiters.shift();
+  if (!w) return null;
+  clearTimeout(w.timer);
+  ok ? w.resolve(value) : w.reject(new Error(value));
+  return w;
+}
+
+async function usbRead() {
+  const reader = usb.port.readable.getReader();
+  const dec = new TextDecoder();
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      usbFeed(dec.decode(value, { stream: true }));
     }
-    const tEnd = data.length ? data[data.length - 1][0] : 0;
-    while (data.length && data[0][0] < tEnd - WINDOW_MS) data.shift();
-  };
+  } catch (e) {
+  } finally {
+    reader.releaseLock();
+    clearInterval(usb.keep);
+    try { usb.writer.releaseLock(); await usb.port.close(); } catch (e) {}
+    usb.writer = usb.port = null;
+    $('usbBtn').hidden = false;
+    $('status').textContent = 'USB disconnected';
+  }
+}
+
+function usbFeed(text) {
+  usb.buf += text;
+  while (true) {
+    if (usb.dl) {                                    // inside GET: take exactly the announced size
+      const take = usb.buf.slice(0, usb.dl.size - usb.dl.got);   // CSV is ASCII: 1 char = 1 byte
+      usb.dl.parts.push(take);
+      usb.dl.got += take.length;
+      usb.buf = usb.buf.slice(take.length);
+      if (usb.dl.got < usb.dl.size) return;
+      usb.dl.w.resolve(usb.dl.parts.join(''));      // the @END line that follows is ignored
+      usb.dl = null;
+      continue;
+    }
+    const i = usb.buf.indexOf('\n');
+    if (i < 0) return;
+    const line = usb.buf.slice(0, i).replace(/\r$/, '');
+    usb.buf = usb.buf.slice(i + 1);
+    if (line.startsWith('@BEGIN,')) {
+      const w = usb.waiters.shift();
+      if (w) { clearTimeout(w.timer); usb.dl = { size: Number(line.split(',')[2]), got: 0, parts: [], w }; }
+    } else if (line.startsWith('@F,')) {
+      const [, name, size] = line.split(',');
+      usb.files.push({ name, size: Number(size) });
+    } else if (line.startsWith('@FILES,') || line.startsWith('@OK,')) {
+      usbReply(true, line);
+    } else if (line.startsWith('@ERR,')) {
+      usbReply(false, line);
+    } else {
+      streamLine(line);
+    }
+  }
 }
 
 // Parse a status line (fields after "#S,"); see net.cpp live_task for the format.
@@ -195,8 +311,11 @@ function onStatus(f) {
   const prev = S;
   S = { page: n(0), zero: n(1), recOn: n(2), recN: n(3), recTarget: n(4), dur: n(5),
         lastRows: n(6), lastFile: f[7], bias: [n(8), n(9), n(10)], theta: [n(11), n(12), n(13)],
-        q: [n(14), n(15), n(16), n(17)], stale: n(18), acc200: n(19) === 1, fused: n(20) === 1 };
-  $('status').textContent = paused ? 'Paused' : 'Live';
+        q: [n(14), n(15), n(16), n(17)], stale: n(18), acc200: n(19) === 1, fused: n(20) === 1,
+        bat: n(21), batMv: n(22), charging: n(23) === 1 };
+  $('status').textContent = (paused ? 'Paused' : 'Live') + (USB ? ' (USB)' : '');
+  trimWindow();
+  $('bat').textContent = S.bat >= 0 ? `\u00B7 Battery ${S.bat} %${S.charging ? ' \u26A1 charging' : ''}` : '';
   document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('dev', +b.dataset.v === S.page));
   if ($('follow').checked && (!prev || prev.page !== S.page || view !== S.page)) setView(S.page);
   const z = S.zero === 0 ? 'Hold still... zeroing' : S.zero === 2 ? 'Moved - press KEY1 again' : 'KEY1 (blue) re-zeroes';
@@ -427,8 +546,15 @@ function frame() {
 }
 
 // ---------------------------------------------------------------- Save CSV
-// Download the samples on the graphs (last 10 s), same columns as recordings,
+// Download the samples on the graphs (last 10 s, 25 Hz), same columns as recordings,
 // with t_ms starting at 0. Named with the phone/laptop clock.
+function saveText(name, text) {
+  const url = URL.createObjectURL(new Blob([text], {type: 'text/csv'}));
+  const a = document.createElement('a');
+  a.href = url; a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
 function saveView() {
   if (!data.length) { flash('Nothing to save yet'); return; }
   const t0 = data[0][0];
@@ -436,11 +562,7 @@ function saveView() {
   for (const r of data) rows.push([r[0] - t0, ...r.slice(1)].join(','));
   const d = new Date(), p = n => String(n).padStart(2, '0');
   const name = `live_${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}.csv`;
-  const url = URL.createObjectURL(new Blob([rows.join('\n') + '\n'], {type: 'text/csv'}));
-  const a = document.createElement('a');
-  a.href = url; a.download = name;
-  document.body.appendChild(a); a.click(); a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  saveText(name, rows.join('\n') + '\n');
   flash(`Saved ${name} (${data.length} rows)`);
 }
 function flash(msg) {
@@ -450,20 +572,49 @@ function flash(msg) {
 }
 
 // ---------------------------------------------------------------- recordings
+// The same three operations over Wi-Fi (HTTP) or USB (usb.cpp commands).
+async function listFiles() {
+  if (!USB) return (await fetch('/api/files')).json();
+  usb.files = [];
+  await usbRequest('LIST');
+  return usb.files.slice();
+}
+async function downloadFile(name) {
+  if (!USB) {
+    const a = document.createElement('a');
+    a.href = '/dl?f=' + name; a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+    return;
+  }
+  flash(`Downloading ${name} over USB...`);
+  saveText(name, await usbRequest('GET ' + name, 30000));
+  flash(`Saved ${name}`);
+}
+async function deleteFile(name) {
+  if (USB) await usbRequest('DEL ' + name);
+  else await fetch('/del?f=' + name, { method: 'POST' });
+}
+
 // List the RUNnn.CSV files on the StickS3 with Download and Delete buttons.
 async function loadFiles() {
   const tb = $('files');
+  if (USB && !usb.port) {
+    tb.innerHTML = '<tr><td class="muted">Click Connect USB first</td></tr>';
+    return;
+  }
   try {
-    const files = (await (await fetch('/api/files')).json()).sort((a, b) => a.name.localeCompare(b.name));
+    const files = (await listFiles()).sort((a, b) => a.name.localeCompare(b.name));
     tb.innerHTML = files.length ? '' : '<tr><td class="muted">No recordings yet</td></tr>';
     for (const f of files) {
       const tr = document.createElement('tr');
       tr.innerHTML = `<td>${f.name}</td><td class="muted">${(f.size / 1024).toFixed(1)} KB</td>
-        <td><a class="btn" href="/dl?f=${f.name}" download="${f.name}">Download</a></td>
+        <td><button class="btn">Download</button></td>
         <td><button class="btn">Delete</button></td>`;
-      tr.querySelector('button').onclick = async () => {
+      const [dl, del] = tr.querySelectorAll('button');
+      dl.onclick = () => downloadFile(f.name).catch(e => flash('Download failed: ' + e.message));
+      del.onclick = async () => {
         if (!confirm(`Delete ${f.name} from the StickS3?`)) return;
-        await fetch('/del?f=' + f.name, {method: 'POST'});
+        await deleteFile(f.name).catch(e => flash('Delete failed: ' + e.message));
         loadFiles();
       };
       tb.appendChild(tr);
@@ -474,7 +625,13 @@ async function loadFiles() {
 }
 
 setView(0);
-connect();
+if (USB) {
+  $('usbBtn').hidden = false;
+  $('usbBtn').onclick = usbConnect;
+  $('status').textContent = 'Not connected';
+} else {
+  connect();
+}
 requestAnimationFrame(frame);
 </script>
 </body>

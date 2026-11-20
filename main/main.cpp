@@ -87,10 +87,18 @@ static void line(int y, uint16_t colour, const char* fmt, ...)
 // Parts of a page that only change when the page changes.
 static void draw_static(void)
 {
-    static const char* title[PAGES] = {
-        "ACCEL (g)       1/4", "GYRO  dps   deg 2/4", "ORIENT fused    3/4", "RECORD          4/4"};
+    // Title: page number and name on the left (at most 14 characters, x <= 172), battery on
+    // the right (draw_battery). The Gyro page labels its two columns in smaller grey text.
+    static const char* title[PAGES] = {"1 ACCEL (g)", "2 GYRO", "3 ORIENT fused", "4 RECORD"};
     M5.Display.fillScreen(TFT_BLACK);
-    text(Y_TITLE, TFT_WHITE, page == PAGE_ORIENT && !ui_orient_fused ? "ORIENT gyro     3/4" : title[page]);
+    text(Y_TITLE, TFT_WHITE, page == PAGE_ORIENT && !ui_orient_fused ? "3 ORIENT gyro" : title[page]);
+    if (page == PAGE_GYRO) {
+        M5.Display.setTextSize(1.5f);
+        M5.Display.setTextColor(TFT_DARKGREY, TFT_BLACK);
+        M5.Display.drawString("dps", 4 + 3 * 12, Y_TITLE + 6);     // over the omega column
+        M5.Display.drawString("deg", 4 + 11 * 12, Y_TITLE + 6);    // over the theta column
+        M5.Display.setTextSize(2);
+    }
     if (page == PAGE_GYRO)   text(Y_BOTTOM, TFT_DARKGREY, "KEY1: zero angles");
     if (page == PAGE_ORIENT) text(Y_BOTTOM, TFT_DARKGREY, "KEY1 zero/hold mode");
     if (page == PAGE_ACCEL) {
@@ -112,8 +120,43 @@ static void draw_static(void)
 }
 
 // Parts of a page that change with every refresh (10 times a second).
+// Battery in the top-right corner: an icon filled to the charge level (green above 50 %,
+// yellow above 20 %, red below) and the percentage in smaller text. On USB power the icon
+// turns cyan and a lightning bolt replaces the % sign ("87" + bolt), keeping the same width.
+static void draw_bolt(int x, int y, uint16_t c)              // 9 x 12 px lightning bolt
+{
+    M5.Display.fillTriangle(x + 6, y,     x,     y + 7, x + 5, y + 6, c);
+    M5.Display.fillTriangle(x + 4, y + 5, x + 9, y + 4, x + 3, y + 12, c);
+    M5.Display.fillRect(x + 3, y + 5, 3, 2, c);
+}
+
+static void draw_battery(void)
+{
+    const int pct = imu_battery_percent();
+    const bool usb = imu_battery_charging();
+    char num[16];
+    if (pct < 0) snprintf(num, sizeof(num), "--");
+    else         snprintf(num, sizeof(num), "%d", pct);
+    const int tw = ((int)strlen(num) + 1) * 9;               // text size 1.5: 9 px per character
+    const int tx = 236 - tw, bx = tx - 26, by = Y_TITLE + 2;
+    const uint16_t c = usb ? TFT_CYAN : pct < 0 ? TFT_DARKGREY : pct > 50 ? TFT_GREEN
+                     : pct > 20 ? TFT_YELLOW : TFT_RED;
+    M5.Display.fillRect(174, 0, 66, 22, TFT_BLACK);
+    M5.Display.drawRect(bx, by, 20, 11, TFT_LIGHTGREY);       // body
+    M5.Display.fillRect(bx + 20, by + 3, 2, 5, TFT_LIGHTGREY); // terminal
+    if (pct > 0) M5.Display.fillRect(bx + 2, by + 2, 16 * pct / 100 + 1, 7, c);
+    M5.Display.setTextSize(1.5f);
+    M5.Display.setTextColor(c, TFT_BLACK);
+    M5.Display.drawString(num, tx, Y_TITLE + 3);
+    const int sx = tx + (int)strlen(num) * 9;                // where the % sign or bolt goes
+    if (usb) draw_bolt(sx, Y_TITLE + 2, TFT_YELLOW);
+    else     M5.Display.drawString("%", sx, Y_TITLE + 3);
+    M5.Display.setTextSize(2);
+}
+
 static void draw_values(const ImuView& v)
 {
+    draw_battery();
     static const uint16_t colour[3] = {TFT_RED, TFT_GREEN, TFT_CYAN};
     static const char axis[3] = {'X', 'Y', 'Z'};
     static const char* name[3] = {"Roll ", "Pitch", "Yaw  "};
@@ -245,6 +288,7 @@ void app_run(void)
 
     text(50, TFT_YELLOW, "Starting Wi-Fi...");
     if (!net_start()) printf("# Wi-Fi / web server not available\n");   // screen shows it
+    usb_start();                                            // recordings and live view over USB
     draw_static();
 
     bool zeroing = false, was_recording = false;

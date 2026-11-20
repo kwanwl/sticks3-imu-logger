@@ -59,6 +59,8 @@ static bool s_web_ok = false;                        // web server and live task
 static std::atomic<int> s_ws_clients{0};
 static std::atomic<int> s_pending{0};                // live batches queued but not yet sent
 static constexpr int MAX_PENDING = 2;
+static constexpr int BEACON_TU = 200;                // beacon interval, time units of 1.024 ms
+static constexpr int8_t TX_POWER_QDBM = 44;          // 11 dBm (units of 0.25 dBm); default about 20 dBm
 
 // ------------------------------------------------------------------------------- storage
 // Mount without formatting; retry once (a passing fault then costs nothing). Only if both
@@ -90,7 +92,7 @@ StorageState storage_init(void)
 
 // Only finished recordings, named exactly RUNnn.CSV, may be listed, downloaded or deleted.
 // This hides temporary RUNnn.TMP files and blocks paths such as "../x" or "a/b".
-static bool is_run_name(const char* f)
+bool is_run_name(const char* f)
 {
     return strlen(f) == 9 && strncmp(f, "RUN", 3) == 0 && isdigit((unsigned char)f[3])
         && isdigit((unsigned char)f[4]) && strcmp(f + 5, ".CSV") == 0;
@@ -214,59 +216,79 @@ static void send_batch(void* arg)
     s_pending--;                                         // this batch is no longer pending
 }
 
-// Every 50 ms: one status line, then every sample taken since the previous message.
+// Live stream, shared format for Wi-Fi (this file) and USB (usb.cpp).
+//
+// Every 100 ms one message: a status line, then the samples since the previous message,
+// thinned to LIVE_HZ (every 4th sample, chosen by its sample number so Wi-Fi and USB agree).
+// Recordings always keep the full SAMPLE_HZ. Fewer, smaller messages leave more airtime
+// when many StickS3s share a room.
 //
 // Status line (lets the browser follow the device and draw angles and orientation):
 //   #S,page,zero,rec_on,rec_n,rec_target,dur_s,last_rows,last_file,
-//      bias_x,bias_y,bias_z,theta_x,theta_y,theta_z,q_w,q_x,q_y,q_z,stale,acc200,fused
+//      bias_x,bias_y,bias_z,theta_x,theta_y,theta_z,q_w,q_x,q_y,q_z,stale,acc200,fused,
+//      bat_pct,bat_mv,charging
 //   page 0..3 = Accel, Gyro, Orient, Record; zero 0 busy / 1 done / 2 moved;
 //   bias in deg/s, theta in degrees, q = the Orient page's quaternion: fused (roll/pitch
 //   relative to gravity, yaw relative to zeroing) when fused = 1, gyro-only when fused = 0;
 //   stale = polls since boot without new accelerometer data;
-//   acc200 = 1 if the accelerometer was confirmed at 200 Hz, 0 if it stayed at 100 Hz.
-//
-// Back-pressure: sending runs on the server task and can block (slow or sleeping client,
-// a download in progress). At most MAX_PENDING batches may wait; while that many are
-// pending, new samples are dropped from the stream (never from recordings) instead of
-// queueing more memory. The browser simply shows a short gap.
+//   acc200 = 1 if the accelerometer was confirmed at 200 Hz, 0 if it stayed at 100 Hz;
+//   bat_pct 0-100 (-1 unknown, smoothed), bat_mv in millivolts, charging 0/1 (USB power present).
 // Sample lines:
 //   t_ms,ax,ay,az,wx,wy,wz   (ms since boot, g, deg/s; gyro offset not removed)
+// Over USB the same lines start with "@S," and "@L," instead (see usb.cpp).
+//
+// Back-pressure (Wi-Fi): sending runs on the server task and can block (slow or sleeping
+// client, a download in progress). At most MAX_PENDING messages may wait; while that many
+// are pending, new samples are dropped from the stream (never from recordings).
 static constexpr size_t STATUS_MAX = 256;
 static constexpr size_t SAMPLE_MAX = 64;
+static constexpr int    LIVE_STEP  = SAMPLE_HZ / LIVE_HZ;  // 4: keep every 4th sample
+
+int status_fields(char* buf, size_t n)
+{
+    char last_file[16] = "";
+    if (ui_last_run > 0) snprintf(last_file, sizeof(last_file), "RUN%02d.CSV", ui_last_run.load());
+    ImuView v;
+    imu_view(&v);
+    const bool fused = ui_orient_fused;
+    const float* qo = fused ? v.qf : v.q;                    // what the Orient page shows
+    const int len = snprintf(buf, n,
+        "%d,%d,%d,%d,%d,%d,%d,%s,%.3f,%.3f,%.3f,%.2f,%.2f,%.2f,%.5f,%.5f,%.5f,%.5f,%lu,%d,%d,%d,%d,%d",
+        ui_page.load(), imu_zero_result(), imu_rec_running() ? 1 : 0, imu_rec_count(),
+        imu_rec_target(), ui_dur_s.load(), ui_last_rows.load(), last_file,
+        v.bias[0], v.bias[1], v.bias[2], v.theta[0], v.theta[1], v.theta[2],
+        qo[0], qo[1], qo[2], qo[3], (unsigned long)imu_stale_reads(), imu_accel_200hz() ? 1 : 0,
+        fused ? 1 : 0, imu_battery_percent(), imu_battery_mv(), imu_battery_charging() ? 1 : 0);
+    return (len < 0 || len >= (int)n) ? 0 : len;
+}
+
+int sample_line(char* buf, size_t n, const Sample& s)
+{
+    const int len = snprintf(buf, n, "%lu,%.3f,%.3f,%.3f,%.1f,%.1f,%.1f\n",
+                             (unsigned long)s.t_ms, s.ax, s.ay, s.az, s.wx, s.wy, s.wz);
+    return (len < 0 || len >= (int)n) ? 0 : len;
+}
 
 static void live_task(void*)
 {
-    uint32_t tail = live_head;                           // next sample to send
+    uint32_t tail = live_head;                           // next sample to consider
     while (true) {
-        vTaskDelay(pdMS_TO_TICKS(50));
+        vTaskDelay(pdMS_TO_TICKS(100));                  // 10 messages per second
         const uint32_t head = live_head;
         // If this task fell behind, skip the oldest samples rather than read slots
         // the IMU task may be overwriting (keep a safety margin of 8).
         if (head - tail > LIVE_N - 8) tail = head - (LIVE_N - 8);
         if (s_pending >= MAX_PENDING) { tail = head; continue; }   // drop: sender is behind
-        const uint32_t n = head - tail;
+        const uint32_t n = (head - tail) / LIVE_STEP + 1;
 
         Batch* b = (Batch*)malloc(sizeof(Batch) + STATUS_MAX + n * SAMPLE_MAX);
         if (!b) continue;
-        char last_file[16] = "";
-        if (ui_last_run > 0) snprintf(last_file, sizeof(last_file), "RUN%02d.CSV", ui_last_run.load());
-        ImuView v;
-        imu_view(&v);
-        const bool fused = ui_orient_fused;
-        const float* qo = fused ? v.qf : v.q;              // what the Orient page shows
-        int len = snprintf(b->text, STATUS_MAX,
-            "#S,%d,%d,%d,%d,%d,%d,%d,%s,%.3f,%.3f,%.3f,%.2f,%.2f,%.2f,%.5f,%.5f,%.5f,%.5f,%lu,%d,%d\n",
-            ui_page.load(), imu_zero_result(), imu_rec_running() ? 1 : 0, imu_rec_count(),
-            imu_rec_target(), ui_dur_s.load(), ui_last_rows.load(), last_file,
-            v.bias[0], v.bias[1], v.bias[2], v.theta[0], v.theta[1], v.theta[2],
-            qo[0], qo[1], qo[2], qo[3], (unsigned long)imu_stale_reads(), imu_accel_200hz() ? 1 : 0,
-            fused ? 1 : 0);
-        if (len < 0 || len >= (int)STATUS_MAX) len = 0;  // never happens in practice; drop the line
+        int len = 0;
+        const int st = status_fields(b->text + 3, STATUS_MAX - 4);
+        if (st > 0) { memcpy(b->text, "#S,", 3); len = 3 + st; b->text[len++] = '\n'; }
         for (; tail != head; tail++) {
-            const Sample& s = live_ring[tail % LIVE_N];
-            const int k = snprintf(b->text + len, SAMPLE_MAX, "%lu,%.3f,%.3f,%.3f,%.2f,%.2f,%.2f\n",
-                                   (unsigned long)s.t_ms, s.ax, s.ay, s.az, s.wx, s.wy, s.wz);
-            if (k > 0 && k < (int)SAMPLE_MAX) len += k;
+            if (tail % LIVE_STEP) continue;              // thin to LIVE_HZ
+            len += sample_line(b->text + len, SAMPLE_MAX, live_ring[tail % LIVE_N]);
         }
         b->len = len;
         s_pending++;
@@ -315,8 +337,15 @@ bool net_start(void)
     ap.ap.channel = channel;
     ap.ap.max_connection = 4;
     ap.ap.authmode = WIFI_AUTH_OPEN;                     // no password; set WIFI_AUTH_WPA2_PSK + ap.ap.password to add one
+    // Beacons every 200 TU (~205 ms) instead of 100: half the beacon airtime per device.
+    ap.ap.beacon_interval = BEACON_TU;
     if ((err = esp_wifi_set_mode(WIFI_MODE_AP)) != ESP_OK
         || (err = esp_wifi_set_config(WIFI_IF_AP, &ap)) != ESP_OK
+        // Disable the 802.11b rates (1-11 Mbps): beacons and broadcasts then go at 6 Mbps
+        // instead of 1 Mbps, about 6 times less airtime each. (The protocol set itself must
+        // still include 802.11b on the ESP32, so the rates are switched off instead.)
+        // Every phone and laptop made since about 2005 supports the faster 802.11g rates.
+        || (err = esp_wifi_config_11b_rate(WIFI_IF_AP, true)) != ESP_OK
         || (err = esp_wifi_start()) != ESP_OK) {
         ESP_LOGE(TAG, "wifi start: %s", esp_err_to_name(err));
         return false;
@@ -329,6 +358,15 @@ bool net_start(void)
         ESP_LOGW(TAG, "set 20 MHz: %s", esp_err_to_name(err));
     esp_wifi_get_bandwidth(WIFI_IF_AP, &bw);
     printf("# wifi bandwidth: default %d MHz, now %d MHz\n", bw_default == WIFI_BW40 ? 40 : 20, bw == WIFI_BW40 ? 40 : 20);
+
+    // Lower transmit power: a student's phone is within a few metres, and a weaker signal
+    // means devices across the room interfere less with each other (better reuse of the
+    // three channels).
+    if ((err = esp_wifi_set_max_tx_power(TX_POWER_QDBM)) != ESP_OK)
+        ESP_LOGW(TAG, "tx power: %s", esp_err_to_name(err));
+    int8_t txp = 0;
+    esp_wifi_get_max_tx_power(&txp);
+    printf("# wifi 802.11b rates off, beacon %d TU, tx power %.1f dBm\n", BEACON_TU, txp / 4.0);
 
     strcpy(s_ssid, ssid);                                // hotspot is visible from here on
     s_channel = channel;

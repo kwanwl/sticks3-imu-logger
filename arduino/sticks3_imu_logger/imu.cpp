@@ -46,6 +46,14 @@ static constexpr uint8_t ACC_CONF    = 0x40;
 static constexpr uint8_t ACC_CONF_200HZ = 0xA9;
 
 static std::atomic<uint32_t> s_stale{0};          // polls without new accelerometer data
+static std::atomic<int>  s_bat_pct{-1};
+static std::atomic<int>  s_bat_mv{0};
+static std::atomic<bool> s_bat_chg{false};
+static constexpr int BATTERY_EVERY = 2 * SAMPLE_HZ;  // read the battery every 2 s
+// "Charging" is taken from the USB supply voltage: the power chip's own charge flag flips
+// between charging and not charging almost every second on the StickS3 (measured), while
+// the USB voltage is a steady ~5.2 V whenever a cable supplies power.
+static constexpr int USB_POWER_MV = 4500;
 static bool s_acc_200hz = false;                  // ACC_CONF confirmed at 0xA9
 
 // Zeroing state. main.cpp resets the sums, then sets s_zero_state = 0; this task only
@@ -141,6 +149,20 @@ static void imu_task(void*)
 
         // Buttons. Clicks fire on release; a hold fires once after M5Unified's hold time.
         M5.update();
+        static int battery_count = 0;
+        if (battery_count-- <= 0) {                          // power chip shares the I2C bus
+            battery_count = BATTERY_EVERY;
+            // The level is estimated from the battery voltage and jitters by a few percent
+            // (load from Wi-Fi, charging current), so it is smoothed: each new reading moves
+            // the shown value 20 % of the way.
+            static float smooth = -1;
+            const int pct = M5.Power.getBatteryLevel();
+            if (pct >= 0 && pct <= 100) smooth = smooth < 0 ? pct : 0.8f * smooth + 0.2f * pct;
+            s_bat_pct = smooth < 0 ? -1 : (int)(smooth + 0.5f);
+            const int mv = M5.Power.getBatteryVoltage();
+            s_bat_mv = mv > 0 ? mv : 0;
+            s_bat_chg = M5.Power.getVBUSVoltage() > USB_POWER_MV;
+        }
         if (M5.BtnA.wasHold())    ev_key1_hold  = true;
         if (M5.BtnA.wasClicked()) ev_key1_click = true;
         if (M5.BtnB.wasClicked()) ev_key2_click = true;
@@ -246,6 +268,9 @@ bool imu_start(void)
 }
 
 uint32_t imu_stale_reads(void) { return s_stale; }
+int      imu_battery_percent(void)  { return s_bat_pct; }
+int      imu_battery_mv(void)       { return s_bat_mv; }
+bool     imu_battery_charging(void) { return s_bat_chg; }
 bool     imu_accel_200hz(void)  { return s_acc_200hz; }
 
 void imu_view(ImuView* out)

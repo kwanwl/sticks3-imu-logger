@@ -6,6 +6,7 @@
 //             angles, fills the recording buffer and the live ring buffer.
 //   main.cpp  Screen and user interface (app_main): pages, button actions, saving files.
 //   net.cpp   Storage (FAT partition), Wi-Fi hotspot, web server and live WebSocket stream.
+//   usb.cpp   The same live stream and the recordings over the USB-C cable (Web Serial page).
 //
 // Threading: imu.cpp's task is the only code that uses the I2C bus (IMU and buttons via
 // M5.update()). Other tasks read its results through imu_view() (a short critical section)
@@ -15,7 +16,8 @@
 #include <cstddef>
 #include <cstdint>
 
-static constexpr int SAMPLE_HZ = 100;                // IMU sampling, recording and live stream rate
+static constexpr int SAMPLE_HZ = 100;                // IMU sampling and recording rate
+static constexpr int LIVE_HZ   = 25;                 // live view rate (Wi-Fi and USB): every 4th sample
 static constexpr int MAX_REC_S = 60;                 // longest recording, sizes the RAM buffer
 static constexpr const char* DATA_DIR = "/data";     // where the FAT partition is mounted
 
@@ -63,6 +65,11 @@ bool imu_accel_200hz(void);
 // false = gyro-only. Toggled by holding KEY1 on the Orient page; sent to the web page.
 extern std::atomic<bool> ui_orient_fused;
 
+// Battery, read from the power chip (M5PM1) every 2 s on the IMU task (the only I2C user).
+int  imu_battery_percent(void);                      // 0-100, -1 if unknown
+int  imu_battery_mv(void);                           // millivolts, 0 if unknown
+bool imu_battery_charging(void);                     // USB power connected (the battery then charges)
+
 // Recording into a RAM (PSRAM) buffer. Start with a length in seconds, poll until
 // imu_rec_running() is false, then read imu_rec_count() samples from imu_rec_data().
 bool          imu_rec_start(int seconds);            // false if already recording or no buffer
@@ -94,5 +101,13 @@ StorageState storage_init(void);                     // mount the FAT partition 
 bool        net_start(void);                         // start hotspot, web server and live stream; false if any failed
 const char* net_ssid(void);                          // hotspot name, e.g. "IMU-A15734"; "" if the hotspot is not running
 int         net_channel(void);                       // Wi-Fi channel of the hotspot (1, 6 or 11), 0 if not running
+
+// Shared by the Wi-Fi and USB streams (net.cpp)
+bool is_run_name(const char* name);                  // exactly RUNnn.CSV
+int  status_fields(char* buf, size_t n);             // the status line's fields, without prefix or newline
+int  sample_line(char* buf, size_t n, const Sample& s);  // "t_ms,ax,ay,az,wx,wy,wz\n"
+
+// ------------------------------------------------------------------------------- usb.cpp
+void usb_start(void);                                // start the USB command/stream task
 bool        net_web_ok(void);                        // web server and live stream are running
 int         net_ws_clients(void);                    // browsers currently receiving the live stream

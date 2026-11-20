@@ -4,8 +4,9 @@ Firmware for the **M5Stack StickS3** that shows, records and streams data from i
 
 - 4 screen pages: acceleration, angular velocity and angles, 3-D orientation, recording
 - Records 5–60 s runs at 100 Hz to the StickS3's flash as CSV files
+- Battery level on every page
 - Wi-Fi hotspot from power-on, with a web page that follows the StickS3: live graphs, a 3-D acceleration arrow, angle dials, a 3-D model that turns with the device, recordings to download, Save CSV
-- No app or internet needed: any phone or laptop browser works
+- No app or internet needed: any phone or laptop browser works; when Wi-Fi is busy, the same page works over the USB cable
 
 **Contents:** [Buttons](#1-buttons) · [Pages](#2-the-pages) · [Web page](#3-the-web-page) · [Data format](#4-data-format) · [Installing the firmware](#5-installing-the-firmware) · [Building from source](#6-building-from-source) · [Arduino version](#arduino-version) · [How the code works](#7-how-the-code-works) · [Troubleshooting](#8-troubleshooting) · [Further reading](#9-further-reading)
 
@@ -26,6 +27,8 @@ Button and port locations: see M5Stack's [StickS3 product page](https://docs.m5s
 ---
 
 ## 2. The pages
+
+**Top line of every page:** the page number and name on the left, and the **battery** on the right: an icon filled to the charge level (green above 50 %, yellow above 20 %, red below) and the percentage. **On USB power** the icon turns cyan and a yellow **lightning bolt** replaces the % sign (e.g. `87⚡`): the battery is charging. The percentage is estimated from the battery voltage and smoothed; it reads a little high while charging and a little low while Wi-Fi is busy.
 
 ### Page 1 – Acceleration (g)
 Shows ax, ay, az in **g**, the standard-gravity unit (1 g = g<sub>n</sub> = 9.80665 m/s², by definition): X red, Y green, Z cyan. The bottom line shows the hotspot name and the web address, e.g. `IMU-DA5734  192.168.4.1`.
@@ -65,11 +68,23 @@ The full 3-D orientation as **roll (X), pitch (Y), yaw (Z)** in degrees. Every g
 
 ## 3. The web page
 
-1. Turn the StickS3 on. The hotspot starts at power-on; its name **IMU-xxxxxx** and the address are on page 1 (bottom line) and page 4.
+The page works over **Wi-Fi** (any phone or laptop) or over the **USB cable** (Chrome or Edge on a computer); both show the same views.
 
-**Many devices in one room:** every StickS3 has its own name, made from the last 6 hex digits of its factory MAC address (e.g. `IMU-DA5734`), so names do not repeat. The name never changes and is the same whichever firmware version is flashed, so it can go on a sticker. The hotspots are spread over Wi-Fi channels 1, 6 and 11 (chosen from the same address; about a third of the devices on each) so they do not all compete for one channel. Each StickS3 accepts up to 4 browsers.
+**Over Wi-Fi**
+
+1. Turn the StickS3 on. The hotspot starts at power-on; its name **IMU-xxxxxx** and the address are on page 1 (bottom line) and page 4.
 2. On a phone or laptop, join that Wi-Fi network (no password). If the phone warns "no internet", choose to **stay connected**.
 3. Open **http://192.168.4.1**.
+
+**Over USB** (when Wi-Fi is busy, or for a laptop without Wi-Fi)
+
+1. Connect the StickS3 to the computer with a USB-C data cable.
+2. In Chrome or Edge open **<https://kwanwl.github.io/sticks3-imu-logger/usb/>** (needs internet once to load).
+3. Click **Connect USB** and choose the port named like `USB JTAG/serial debug unit`.
+
+Connecting does not restart the StickS3, so a recording in progress carries on. Live graphs, the views and downloading or deleting recordings work exactly as over Wi-Fi.
+
+**Many devices in one room:** every StickS3 has its own name, made from the last 6 hex digits of its factory MAC address (e.g. `IMU-DA5734`), so names do not repeat. The name never changes and is the same whichever firmware version is flashed, so it can go on a sticker. The hotspots are spread over Wi-Fi channels 1, 6 and 11 (chosen from the same address; about a third of the devices on each), and each one is set up to use as little airtime as possible (see "How the code works"). Each StickS3 accepts up to 4 browsers. If the live view still lags with a whole class, use the USB connection.
 
 The page has five buttons: **Accel, Gyro, Orient, Record, Live**. With **Follow StickS3** ticked (the default), KEY2 on the StickS3 also switches the browser; a dot marks the StickS3's current page. Tapping a button shows that view and unticks Follow until you tick it again.
 
@@ -81,9 +96,9 @@ The page has five buttons: **Accel, Gyro, Orient, Record, Live**. With **Follow 
 | Record | Recording progress, length and last file; saved runs with **Download** and **Delete** | 4 |
 | Live | Acceleration and angular-velocity graphs together | browser only |
 
-- Data streams at 100 Hz on every page; graphs show the last 10 s.
+- The live view shows **25 samples per second** (every 4th sample) for the last 10 s; this keeps Wi-Fi traffic low with many devices. **Recordings always keep the full 100 Hz.**
 - **Drag** a 3-D view to turn the camera.
-- **Pause** freezes the graphs. **Save CSV** downloads what is on them as `live_YYYYMMDD-HHMMSS.csv` (press Pause first to capture a moment). On iPhone the file goes to *Files → Downloads*.
+- **Pause** freezes the graphs. **Save CSV** downloads what is on them as `live_YYYYMMDD-HHMMSS.csv` at 25 Hz (press Pause first to capture a moment; for 100 Hz data use a recording). On iPhone the file goes to *Files → Downloads*.
 
 ### StickS3 axes
 Measured on a StickS3 (19 Nov 2026) and used by the 3-D model. Hold it with the screen facing you and USB-C at the bottom:
@@ -193,7 +208,8 @@ sticks3-imu-logger/
     main.cpp            screen pages, button actions, saving recordings
     imu.cpp             100 Hz IMU task: buttons, angles, quaternion, recording, live buffer
     net.cpp             storage, Wi-Fi hotspot, web server, live WebSocket stream
-    web/index.html      the web page (built into the firmware)
+    usb.cpp             the same live stream and recordings over the USB cable
+    web/index.html      the web page (built into the firmware; also served by GitHub Pages for USB)
     idf_component.yml   M5Unified dependency
   arduino/sticks3_imu_logger/   Arduino IDE version (see "Arduino version")
     sticks3_imu_logger.ino      entry point: setup() calls app_run()
@@ -204,6 +220,8 @@ sticks3-imu-logger/
     make_docx.py        makes Word versions of the documents (needs pandoc)
   firmware/
     sticks3-imu-logger.bin   merged image for browser flashing (address 0x0)
+  usb/
+    index.html          short address for the USB version of the web page (GitHub Pages)
   flasher/
     index.html, manifest.json   one-click web installer (GitHub Pages, ESP Web Tools)
 ```
@@ -212,7 +230,9 @@ sticks3-imu-logger/
 
 | Change | Where |
 | --- | --- |
-| Sample rate (100 Hz, also the stream rate) | `SAMPLE_HZ` in `main/app.h` |
+| Sample rate (100 Hz) | `SAMPLE_HZ` in `main/app.h` |
+| Live view rate (25 Hz) | `LIVE_HZ` in `main/app.h` |
+| Wi-Fi transmit power, beacon interval | `TX_POWER_QDBM`, `BEACON_TU` in `main/net.cpp` |
 | Longest recording (60 s) | `MAX_REC_S` in `main/app.h` |
 | Recording lengths offered | `DURATIONS[]` in `main/main.cpp` |
 | Hotspot name, password, channel | `net_start()` in `main/net.cpp` |
@@ -277,12 +297,16 @@ Three FreeRTOS tasks share data through `main/app.h`:
 | --- | --- | --- | --- |
 | `imu` | `imu.cpp` | 1 / 10 | Every 10 ms: read buttons and IMU (the only I2C user), integrate θ and the quaternion, zeroing, recording, live ring buffer, publish a snapshot |
 | `main` | `main.cpp` | default | Screen at 10 Hz, button actions, write the recording to `RUNnn.TMP`, then rename it to `RUNnn.CSV` |
-| `live` + HTTP server | `net.cpp` | 0 / 5 | Every 50 ms send a status line and the new samples to all WebSocket clients; serve the page and files |
+| `live` + HTTP server | `net.cpp` | 0 / 5 | Every 100 ms send a status line and the new samples (thinned to 25 Hz) to all WebSocket clients; serve the page and files |
+| `usb` | `usb.cpp` | 0 / 4 | Every 100 ms read commands from the USB cable; send files, and the live stream while a page asks for it |
 
 - **Hand-over between tasks:** the IMU task publishes `ImuView` under a short spinlock (`imu_view()`); button events, page, recording progress and zeroing state are atomics.
 - **Recording** fills a 168 KB PSRAM buffer at 100 Hz, then `main.cpp` writes the CSV, so flash writes never disturb the sample timing. The file is written as `.TMP` and renamed only if every write succeeded; leftover `.TMP` files are removed at start-up.
 - **Storage** is mounted without formatting (with one retry). Only if that fails is it formatted explicitly, and the screen then shows *Storage was reset*: the old runs are gone.
 - **Live stream back-pressure:** at most 2 messages may wait to be sent and the send timeout is 1 s, so a sleeping phone or a download cannot make memory grow; the stream drops samples instead (recordings are unaffected).
+- **Wi-Fi airtime:** with a whole class of hotspots the 2.4 GHz band is shared, so each StickS3 keeps its airtime small: 802.11b rates off (beacons and broadcasts at 6 Mbps instead of 1 Mbps), beacons every 200 TU instead of 100, transmit power 11 dBm instead of about 20 (students sit close; devices across the room interfere less), and the live view thinned to 25 Hz in 10 messages a second.
+- **Battery:** read from the M5PM1 power chip every 2 s on the IMU task, which is the only task that uses the I2C bus. The percentage is smoothed (each reading moves it 20 % of the way). "Charging" means USB power is present (supply above 4.5 V): the chip's own charge flag flips between charging and not charging about every second on the StickS3, so it is not used.
+- **USB link:** both builds install ESP-IDF's USB-Serial-JTAG driver and route the console through it. Without a computer, output is dropped, so the StickS3 never waits on battery. Opening the port normally does not reset the board; only switching the DTR/RTS signals off does (the flashers' auto-reset).
 - **Sampling:** the BMI270 accelerometer is set to 200 Hz (`ACC_CONF = 0xA9`; reset value 100 Hz would beat against the 100 Hz polling). The setting is read back (one retry); if it did not stick, the device keeps running at 100 Hz and warns on screen and on the web page. Polls without new accelerometer data are counted (`stale` in the status line).
 - **Angles:** θ per axis is a simple sum of ω·dt. Two quaternions are updated with every sample, each rotated by |ω|·dt about ω in the device's own frame (`quat_step()` in `imu.cpp`): a gyro-only one, and a fused one whose rate is first corrected toward the accelerometer's gravity direction (`fusion_correction()`, Mahony filter, gain 1/s, skipped when the reading is more than 0.15 g from 1 g). The screen and web page convert the selected one to Z-Y-X roll / pitch / yaw.
 
@@ -296,14 +320,26 @@ Three FreeRTOS tasks share data through `main/app.h`:
 | `POST /del?f=RUN01.CSV` | Delete a recording |
 | `GET /ws` | WebSocket live stream |
 
-Each WebSocket message (every 50 ms) is text: one status line, then one line per sample.
+Each WebSocket message (every 100 ms) is text: one status line, then one line per sample (25 Hz).
 
 ```text
-#S,page,zero,rec_on,rec_n,rec_target,dur_s,last_rows,last_file,bias_x,bias_y,bias_z,theta_x,theta_y,theta_z,q_w,q_x,q_y,q_z,stale,acc200,fused
+#S,page,zero,rec_on,rec_n,rec_target,dur_s,last_rows,last_file,bias_x,bias_y,bias_z,theta_x,theta_y,theta_z,q_w,q_x,q_y,q_z,stale,acc200,fused,bat_pct,bat_mv,charging
 t_ms,ax,ay,az,wx,wy,wz
 ```
 
-`page` 0–3 = Accel, Gyro, Orient, Record; `zero` 0 busy / 1 done / 2 moved; `q` is the quaternion the Orient page shows, fused when `fused` = 1, gyro-only when 0; `stale` = polls since power-on without new accelerometer data; `acc200` = 1 if the accelerometer was confirmed at 200 Hz; sample `t_ms` is time since boot. Only names of the form `RUNnn.CSV` can be listed, downloaded or deleted.
+`page` 0–3 = Accel, Gyro, Orient, Record; `zero` 0 busy / 1 done / 2 moved; `q` is the quaternion the Orient page shows, fused when `fused` = 1, gyro-only when 0; `stale` = polls since power-on without new accelerometer data; `acc200` = 1 if the accelerometer was confirmed at 200 Hz; `bat_pct` 0–100 (−1 unknown), `bat_mv` millivolts, `charging` 0/1; sample `t_ms` is time since boot. Only names of the form `RUNnn.CSV` can be listed, downloaded or deleted.
+
+### USB interface
+
+The USB page (Web Serial) sends one command per line; the StickS3 replies with lines starting with `@` (other lines, such as `# …` log messages, are ignored):
+
+| Command | Reply |
+| --- | --- |
+| `HELLO` | `@HELLO,sticks3-imu-logger,<hotspot name>` |
+| `LIST` | `@F,<name>,<size>` per recording, then `@FILES,<count>` |
+| `GET <name>` | `@BEGIN,<name>,<size>`, exactly `<size>` bytes of the file, a newline, `@END,<name>` |
+| `DEL <name>` | `@OK,DEL,<name>` or `@ERR,DEL,<name>` |
+| `LIVE 1` / `LIVE 0` | Starts / stops the live stream: `@S,…` and `@L,…` lines with the same fields as the WebSocket stream. The page repeats `LIVE 1` every 3 s; the stream stops by itself 10 s after the last one |
 
 ---
 
@@ -316,7 +352,9 @@ t_ms,ax,ay,az,wx,wy,wz
 | `192.168.4.1` won't load | Check the phone is still on `IMU-xxxxxx`; type `http://`, not `https://` |
 | Browser does not change view with KEY2 | Tick **Follow StickS3** at the top of the page |
 | 3-D model turns the wrong way | Check the axes against the "StickS3 axes" table; adjust `MODEL` in `main/web/index.html` |
-| Graphs stutter | Close other tabs; up to 4 browsers can connect to one StickS3 |
+| Graphs stutter or lag with many devices | Close other tabs; up to 4 browsers can connect to one StickS3. With a whole class on Wi-Fi, use the USB page instead |
+| USB page: no port, or *USB needs Chrome or Edge* | Use Chrome or Edge on a computer and a USB-C data cable; close the Arduino IDE and other serial programs |
+| Battery shows `--%` | The power chip did not answer; turn the StickS3 off and on |
 | Angles drift on pages 2–3 | Normal for a gyro: re-zero with KEY1 (hold still) |
 | Screen blank after flashing | Still in download mode: unplug, double-press power to turn off, press to turn on |
 | `99 runs: delete some` or `Save failed (full?)` | Download, then delete old runs in the Record view |
