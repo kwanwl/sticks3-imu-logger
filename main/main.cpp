@@ -51,6 +51,8 @@ static constexpr float DEG = 180.0f / (float)M_PI;
 
 // Screen layout: 240 x 135 landscape, text size 2 (12 x 16 px characters, 20 per line).
 static constexpr int Y_TITLE = 4, Y_ROW1 = 34, ROW_STEP = 26, Y_BOTTOM = 116;
+// Gyro page: a units line under the title, so its rows start lower and sit closer together.
+static constexpr int Y_GYRO_UNITS = 23, Y_GYRO_ROW1 = 40, GYRO_ROW_STEP = 24;
 
 // Convert the orientation quaternion to Z-Y-X Euler angles in degrees:
 // e[0] = roll about X, e[1] = pitch about Y, e[2] = yaw about Z.
@@ -93,10 +95,12 @@ static void draw_static(void)
     M5.Display.fillScreen(TFT_BLACK);
     text(Y_TITLE, TFT_WHITE, page == PAGE_ORIENT && !ui_orient_fused ? "3 ORIENT gyro" : title[page]);
     if (page == PAGE_GYRO) {
+        // Column units on their own line under the title, right-aligned over the columns of
+        // "X  +12.3   +45.6" (omega in characters 1-7, theta in 8-15); rows start lower.
         M5.Display.setTextSize(1.5f);
         M5.Display.setTextColor(TFT_DARKGREY, TFT_BLACK);
-        M5.Display.drawString("dps", 4 + 3 * 12, Y_TITLE + 6);     // over the omega column
-        M5.Display.drawString("deg", 4 + 11 * 12, Y_TITLE + 6);    // over the theta column
+        M5.Display.drawString("dps", 4 + 8 * 12 - 27, Y_GYRO_UNITS);   // ends at the omega column
+        M5.Display.drawString("deg", 4 + 16 * 12 - 27, Y_GYRO_UNITS);  // ends at the theta column
         M5.Display.setTextSize(2);
     }
     if (page == PAGE_GYRO)   text(Y_BOTTOM, TFT_DARKGREY, "KEY1: zero angles");
@@ -167,7 +171,7 @@ static void draw_values(const ImuView& v)
         float e[3];
         quat_to_euler(ui_orient_fused ? v.qf : v.q, e);
         for (int i = 0; i < 3; i++) {
-            const int y = Y_ROW1 + i * ROW_STEP;
+            const int y = page == PAGE_GYRO ? Y_GYRO_ROW1 + i * GYRO_ROW_STEP : Y_ROW1 + i * ROW_STEP;
             if (page == PAGE_ACCEL)     line(y, colour[i], "%c: %+7.3f", axis[i], a[i]);
             else if (page == PAGE_GYRO) line(y, colour[i], "%c%+7.1f%+8.1f", axis[i], w[i], v.theta[i]);
             else                        line(y, colour[i], "%s %c %+7.1f", name[i], axis[i], e[i]);

@@ -1,6 +1,6 @@
 {
   "name": "StickS3 IMU Logger",
-  "version": "2026-11-20.3",
+  "version": "2026-11-20.4",
   "new_install_prompt_erase": false,
   "builds": [
     {
