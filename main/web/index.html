@@ -205,7 +205,8 @@ function connect() {
 }
 
 // USB: Web Serial (Chrome / Edge on a computer). Protocol in main/usb.cpp.
-const usb = { port: null, writer: null, buf: '', waiters: [], files: [], dl: null, keep: null };
+const usb = { port: null, writer: null, buf: '', waiters: [], files: [], dl: null, endCheck: null, keep: null };
+const DL_IDLE_MS = 3000;          // a download with no data for this long is abandoned
 
 async function usbConnect() {
   if (!('serial' in navigator)) {
@@ -272,8 +273,26 @@ async function usbRead() {
   }
 }
 
+// A download is kept only if exactly the announced number of bytes arrives AND the next line
+// is the matching "@END,<name>". The StickS3 sends no @END when a transfer breaks off, so a
+// file with a gap is never saved; it fails (and can be retried) instead.
+function dlFail(msg) {
+  const d = usb.dl || usb.endCheck;
+  if (!d) return;
+  clearTimeout(d.idle);
+  usb.dl = usb.endCheck = null;
+  d.w.reject(new Error(msg));
+}
+function dlActivity() {
+  const d = usb.dl || usb.endCheck;
+  if (!d) return;
+  clearTimeout(d.idle);
+  d.idle = setTimeout(() => dlFail('transfer stopped'), DL_IDLE_MS);
+}
+
 function usbFeed(text) {
   usb.buf += text;
+  dlActivity();
   while (true) {
     if (usb.dl) {                                    // inside GET: take exactly the announced size
       const take = usb.buf.slice(0, usb.dl.size - usb.dl.got);   // CSV is ASCII: 1 char = 1 byte
@@ -281,7 +300,7 @@ function usbFeed(text) {
       usb.dl.got += take.length;
       usb.buf = usb.buf.slice(take.length);
       if (usb.dl.got < usb.dl.size) return;
-      usb.dl.w.resolve(usb.dl.parts.join(''));      // the @END line that follows is ignored
+      usb.endCheck = usb.dl;                        // now the @END line must follow
       usb.dl = null;
       continue;
     }
@@ -289,9 +308,23 @@ function usbFeed(text) {
     if (i < 0) return;
     const line = usb.buf.slice(0, i).replace(/\r$/, '');
     usb.buf = usb.buf.slice(i + 1);
+    if (usb.endCheck) {
+      if (line === '') continue;                     // the newline before @END
+      const d = usb.endCheck;
+      usb.endCheck = null;
+      clearTimeout(d.idle);
+      if (line === '@END,' + d.name) d.w.resolve(d.parts.join(''));
+      else d.w.reject(new Error('incomplete transfer'));
+      if (line.startsWith('@END,')) continue;
+    }
     if (line.startsWith('@BEGIN,')) {
       const w = usb.waiters.shift();
-      if (w) { clearTimeout(w.timer); usb.dl = { size: Number(line.split(',')[2]), got: 0, parts: [], w }; }
+      if (w) {
+        clearTimeout(w.timer);
+        const [, name, size] = line.split(',');
+        usb.dl = { name, size: Number(size), got: 0, parts: [], w };
+        dlActivity();
+      }
     } else if (line.startsWith('@F,')) {
       const [, name, size] = line.split(',');
       usb.files.push({ name, size: Number(size) });
@@ -313,7 +346,8 @@ function onStatus(f) {
   S = { page: n(0), zero: n(1), recOn: n(2), recN: n(3), recTarget: n(4), dur: n(5),
         lastRows: n(6), lastFile: f[7], bias: [n(8), n(9), n(10)], theta: [n(11), n(12), n(13)],
         q: [n(14), n(15), n(16), n(17)], stale: n(18), acc200: n(19) === 1, fused: n(20) === 1,
-        bat: n(21), batMv: n(22), charging: n(23) === 1 };
+        bat: n(21), batMv: n(22), charging: n(23) === 1,
+        delSeq: n(24), delState: n(25), delName: f[26] || '' };
   $('status').textContent = (paused ? 'Paused' : 'Live') + (USB ? ' (USB)' : '');
   trimWindow();
   $('bat').textContent = S.bat >= 0 ? `\u00B7 Battery ${S.bat} %${S.charging ? ' \u26A1 charging' : ''}` : '';
@@ -591,9 +625,28 @@ async function downloadFile(name) {
   saveText(name, await usbRequest('GET ' + name, 30000));
   flash(`Saved ${name}`);
 }
+// Deleting needs KEY1 on the StickS3 (nobody else on the hotspot can delete). The request
+// returns a number; its outcome then appears in the status line (del_seq / del_state).
 async function deleteFile(name) {
-  if (USB) await usbRequest('DEL ' + name);
-  else await fetch('/del?f=' + name, { method: 'POST' });
+  let reply;
+  if (USB) reply = await usbRequest('DEL ' + name);
+  else {
+    const r = await fetch('/del?f=' + name, { method: 'POST' });
+    if (!r.ok) throw new Error(r.status === 500 ? 'another delete is waiting' : 'bad name');
+    reply = await r.text();
+  }
+  const seq = Number(reply.split(',').pop());
+  $('status').textContent = `Press KEY1 on the StickS3 to delete ${name} (KEY2 cancels)`;
+  const t0 = Date.now();
+  while (Date.now() - t0 < 15000) {
+    await new Promise(res => setTimeout(res, 200));
+    if (S && S.delSeq === seq && S.delState >= 2) {
+      const msg = { 2: `Deleted ${name}`, 3: `Not deleted (cancelled on the StickS3)`, 4: `Could not delete ${name}` }[S.delState];
+      flash(msg);
+      return;
+    }
+  }
+  flash('No answer from the StickS3');
 }
 
 // List the RUNnn.CSV files on the StickS3 with Download and Delete buttons.
@@ -614,7 +667,7 @@ async function loadFiles() {
       const [dl, del] = tr.querySelectorAll('button');
       dl.onclick = () => downloadFile(f.name).catch(e => flash('Download failed: ' + e.message));
       del.onclick = async () => {
-        if (!confirm(`Delete ${f.name} from the StickS3?`)) return;
+        if (!confirm(`Delete ${f.name}? You will need to press KEY1 on the StickS3 to confirm.`)) return;
         await deleteFile(f.name).catch(e => flash('Delete failed: ' + e.message));
         loadFiles();
       };

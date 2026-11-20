@@ -93,9 +93,22 @@ extern std::atomic<int> ui_dur_s;                    // selected recording lengt
 extern std::atomic<int> ui_last_rows;                // rows in the last saved file
 extern std::atomic<int> ui_last_run;                 // number of the last saved RUNnn.CSV, 0 = none
 
+// Deleting a recording from the web page (Wi-Fi or USB) needs a KEY1 press on the StickS3, so
+// nobody else on the open hotspot can delete runs. request_delete() starts a request and
+// returns its number (0 if another request is waiting); the main loop asks on the screen and
+// reports the outcome through delete_status(): 1 waiting, 2 deleted, 3 cancelled or timed
+// out, 4 delete failed.
+enum { DEL_NONE, DEL_WAITING, DEL_DONE, DEL_CANCELLED, DEL_FAILED };
+int  request_delete(const char* name);
+void delete_status(int* seq, int* state, char* name, size_t n);
+
 // ------------------------------------------------------------------------------- net.cpp
-enum StorageState { STORAGE_OK, STORAGE_RESET, STORAGE_FAILED };
+// STORAGE_RESET: the partition was blank (new or erased device) and has been formatted.
+// STORAGE_DAMAGED: it holds data but cannot be mounted; it is left untouched (recordings may
+// be recoverable) until the user erases it on purpose with storage_erase().
+enum StorageState { STORAGE_OK, STORAGE_RESET, STORAGE_DAMAGED, STORAGE_FAILED };
 StorageState storage_init(void);                     // mount the FAT partition at DATA_DIR (see net.cpp)
+bool         storage_erase(void);                    // format and mount; deletes everything
 bool        net_start(void);                         // start hotspot, web server and live stream; false if any failed
 const char* net_ssid(void);                          // hotspot name, e.g. "IMU-A15734"; "" if the hotspot is not running
 int         net_channel(void);                       // Wi-Fi channel of the hotspot (1, 6 or 11), 0 if not running

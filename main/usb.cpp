@@ -9,8 +9,10 @@
 //                  the stream stops by itself LIVE_TIMEOUT_MS after the last one)
 //   LIST           -> @F,<name>,<size> for each recording, then @FILES,<count>
 //   GET <name>     -> @BEGIN,<name>,<size>  then exactly <size> bytes of the file,
-//                     then a newline and @END,<name>
-//   DEL <name>     -> @OK,DEL,<name>  or  @ERR,DEL,<name>
+//                     then a newline and @END,<name>. If the computer stops reading, the
+//                     transfer is abandoned without @END; the page then discards it.
+//   DEL <name>     -> @OK,DEL,<request number> (the StickS3 asks for KEY1; the outcome is
+//                     del_state in the status line) or @ERR,DEL,<name> (bad name or busy)
 // Live stream (every 100 ms while on): @S,<status fields> and @L,<sample> lines, the same
 // fields as the Wi-Fi stream (see net.cpp), but with every sample (100 Hz): a USB cable has
 // plenty of capacity and does not share the crowded Wi-Fi band, so it is not thinned. Other lines (e.g. "# ..." log lines) are ignored
@@ -45,15 +47,17 @@ static void out_begin(void)
     flockfile(stdout);
 }
 
-static void out(const char* data, size_t n)
+// Returns false if the computer did not take the data within 50 ms (the rest is dropped).
+static bool out(const char* data, size_t n)
 {
     fflush(stdout);                                   // anything printf has buffered goes first
     while (n > 0) {                                   // straight into the driver's buffer
         const int k = usb_serial_jtag_write_bytes(data, n, pdMS_TO_TICKS(50));
-        if (k <= 0) break;                            // host not reading: drop the rest
+        if (k <= 0) return false;
         data += k;
         n -= k;
     }
+    return true;
 }
 
 static void out_end(void)
@@ -110,24 +114,28 @@ static void cmd_get(const char* name)
 
     // The page reads exactly <size> bytes after the @BEGIN line, so the whole transfer is
     // one locked message; the live stream is paused because it runs on this same task.
+    // If any write fails, stop at once and send no @END: the page only keeps a file whose
+    // exact size is followed by the matching @END line, so a gap can never be saved.
     static char buf[1024];
     out_begin();
     int n = snprintf(line, sizeof(line), "@BEGIN,%s,%ld\n", name, (long)st.st_size);
-    out(line, n);
+    bool ok = out(line, n);
     size_t k;
-    while ((k = fread(buf, 1, sizeof(buf), f)) > 0) out(buf, k);
-    n = snprintf(line, sizeof(line), "\n@END,%s\n", name);
-    out(line, n);
+    while (ok && (k = fread(buf, 1, sizeof(buf), f)) > 0) ok = out(buf, k);
+    if (ok) {
+        n = snprintf(line, sizeof(line), "\n@END,%s\n", name);
+        out(line, n);
+    }
     out_end();
     fclose(f);
 }
 
 static void cmd_del(const char* name)
 {
-    char path[40], line[64];
-    snprintf(path, sizeof(path), "%s/%s", DATA_DIR, name);
-    const bool ok = is_run_name(name) && unlink(path) == 0;
-    snprintf(line, sizeof(line), "@%s,DEL,%s", ok ? "OK" : "ERR", name);
+    char line[64];
+    const int seq = is_run_name(name) ? request_delete(name) : 0;
+    if (seq) snprintf(line, sizeof(line), "@OK,DEL,%d", seq);
+    else     snprintf(line, sizeof(line), "@ERR,DEL,%.40s", name);
     out_line(line);
 }
 
@@ -183,7 +191,7 @@ static void usb_task(void*)
         if (head - tail > LIVE_N - 8) tail = head - (LIVE_N - 8);
         static char msg[2048];
         int len = 0;
-        const int st = status_fields(msg + 3, 256);
+        const int st = status_fields(msg + 3, 300);
         if (st > 0) { memcpy(msg, "@S,", 3); len = 3 + st; msg[len++] = '\n'; }
         for (; tail != head; tail++) {
             if (len > (int)sizeof(msg) - 80) break;      // rest goes in the next message

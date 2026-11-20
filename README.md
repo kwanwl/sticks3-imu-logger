@@ -61,7 +61,7 @@ The full 3-D orientation as **roll (X), pitch (Y), yaw (Z)** in degrees. Every g
 - Shows the hotspot name and Wi-Fi channel (`IMU-DA5734  ch6`), the address `192.168.4.1` and how many browsers are connected (`web:1`).
 - **Hold KEY1** to choose the length (default **10 s**); **press KEY1** to start.
 - A red bar shows progress. Then the screen shows the file and row count, e.g. `RUN03.CSV 1000 rows`.
-- Files survive power-off. Two limits apply, whichever comes first: **99 files** (`RUN01`–`RUN99`) and the **~5 MB storage space**. A 10 s run is about 45 KB, a 60 s run about 270 KB, so roughly 15–18 runs of 60 s fit; the exact number depends on the data. When either limit is reached the screen shows an error; download and delete old runs.
+- Files survive power-off and firmware updates. Two limits apply, whichever comes first: **99 files** (`RUN01`–`RUN99`) and the **~5 MB storage space**. A 10 s run is about 45 KB, a 60 s run about 270 KB, so roughly 15–18 runs of 60 s fit; the exact number depends on the data. When either limit is reached the screen shows an error; download and delete old runs.
 - If saving fails (e.g. storage full), the error stays on the screen until the next KEY1 press, and no partial file is left behind.
 
 ---
@@ -93,10 +93,12 @@ The page has five buttons: **Accel, Gyro, Orient, Record, Live**. With **Follow 
 | Accel | 3-D arrow of the acceleration vector on a StickS3 model with its X/Y/Z axes, \|a\| in g, acceleration graphs | 1 |
 | Gyro | Dials for θx, θy, θz (positive = anticlockwise, right-hand rule), angular-velocity graphs with the offset removed | 2 |
 | Orient | 3-D StickS3 model that follows the device's orientation (sensor fusion: the right side up, grey square = level ground; or gyro only: relative to the zeroing pose), roll / pitch / yaw, and which mode is active | 3 |
-| Record | Recording progress, length and last file; saved runs with **Download** and **Delete** | 4 |
+| Record | Recording progress, length and last file; saved runs with **Download** and **Delete** (deleting needs KEY1 on the StickS3, see below) | 4 |
 | Live | Acceleration and angular-velocity graphs together | browser only |
 
 - The live view shows the last 10 s: **25 samples per second over Wi-Fi** (every 4th sample, to keep Wi-Fi traffic low with many devices) and the **full 100 Hz over USB**. Over Wi-Fi, events shorter than about 40 ms (an impact, the moment of release) can be missed or look smaller. **Recordings always keep the full 100 Hz.**
+- **Deleting a recording** needs the StickS3 in your hand: after **Delete**, its screen asks `Del RUN03.CSV? KEY1`. Press **KEY1** to delete; KEY2, or no answer within 10 s, cancels. This stops anyone else on the open hotspot from deleting your runs.
+- **Downloads over USB are checked:** a file is saved only if it arrived complete; otherwise the page says *Download failed* and you can try again.
 - **Drag** a 3-D view to turn the camera.
 - **Pause** freezes the graphs. **Save CSV** downloads what is on them as `live_YYYYMMDD-HHMMSS.csv` (25 Hz over Wi-Fi, 100 Hz over USB; press Pause first to capture a moment). On iPhone the file goes to *Files → Downloads*.
 
@@ -168,7 +170,7 @@ Do not click **Erase Flash**: it deletes the recordings saved on the StickS3.
 | No port appears, or connecting fails | Enter **download mode**: with USB connected, hold the **power button** (next to USB-C) about 2 s until the internal green LED blinks, then try again |
 | Finished, but the screen stays blank | Still in download mode: unplug, **double-press** the power button to turn off, press once to turn on |
 | Still no port | Another cable or USB port; on Linux add your user to the `dialout` group and log in again |
-| *Storage was reset* on the first start | Normal on a new or erased StickS3: the recordings area is being prepared |
+| *Storage prepared* on the first start | Normal on a new or erased StickS3: the recordings area is being set up |
 
 ### Updating the hosted installer (maintainers)
 
@@ -256,7 +258,8 @@ Three FreeRTOS tasks share data through `main/app.h`:
 
 - **Hand-over between tasks:** the IMU task publishes `ImuView` under a short spinlock (`imu_view()`); button events, page, recording progress and zeroing state are atomics.
 - **Recording** fills a 168 KB PSRAM buffer at 100 Hz, then `main.cpp` writes the CSV, so flash writes never disturb the sample timing. The file is written as `.TMP` and renamed only if every write succeeded; leftover `.TMP` files are removed at start-up.
-- **Storage** is mounted without formatting (with one retry). Only if that fails is it formatted explicitly, and the screen then shows *Storage was reset*: the old runs are gone.
+- **Storage** is mounted without formatting (with one retry). If that fails and the partition is **blank** (a new or erased device), it is formatted and the screen shows *Storage prepared*. If it **holds data** but will not mount (damage, or a future incompatible format), it is **never formatted automatically**: the screen shows *Storage error*, recording is off, and the user can erase it deliberately on the Record page (hold KEY1, then hold KEY1 again within 5 s).
+- **Saving before starting:** the main loop saves a finished recording before it handles a new KEY1 press, so a quick second press cannot overwrite a run that has not been saved yet.
 - **Live stream back-pressure:** at most 2 messages may wait to be sent and the send timeout is 1 s, so a sleeping phone or a download cannot make memory grow; the stream drops samples instead (recordings are unaffected).
 - **Wi-Fi airtime:** with a whole class of hotspots the 2.4 GHz band is shared, so each StickS3 keeps its airtime small: 802.11b rates off (beacons and broadcasts at 6 Mbps instead of 1 Mbps), beacons every 200 TU instead of 100, transmit power 11 dBm instead of about 20 (students sit close; devices across the room interfere less), and the live view thinned to 25 Hz in 10 messages a second.
 - **Battery:** read from the M5PM1 power chip every 2 s on the IMU task, which is the only task that uses the I2C bus. The percentage is smoothed (each reading moves it 20 % of the way). "Charging" means USB power is present (supply above 4.5 V): the chip's own charge flag flips between charging and not charging about every second on the StickS3, so it is not used.
@@ -277,11 +280,11 @@ Three FreeRTOS tasks share data through `main/app.h`:
 Each WebSocket message (every 100 ms) is text: one status line, then one line per sample (25 Hz).
 
 ```text
-#S,page,zero,rec_on,rec_n,rec_target,dur_s,last_rows,last_file,bias_x,bias_y,bias_z,theta_x,theta_y,theta_z,q_w,q_x,q_y,q_z,stale,acc200,fused,bat_pct,bat_mv,charging
+#S,page,zero,rec_on,rec_n,rec_target,dur_s,last_rows,last_file,bias_x,bias_y,bias_z,theta_x,theta_y,theta_z,q_w,q_x,q_y,q_z,stale,acc200,fused,bat_pct,bat_mv,charging,del_seq,del_state,del_name
 t_ms,ax,ay,az,wx,wy,wz
 ```
 
-`page` 0–3 = Accel, Gyro, Orient, Record; `zero` 0 busy / 1 done / 2 moved; `q` is the quaternion the Orient page shows, fused when `fused` = 1, gyro-only when 0; `stale` = polls since power-on without new accelerometer data; `acc200` = 1 if the accelerometer was confirmed at 200 Hz; `bat_pct` 0–100 (−1 unknown), `bat_mv` millivolts, `charging` 0/1; sample `t_ms` is time since boot. Only names of the form `RUNnn.CSV` can be listed, downloaded or deleted.
+`page` 0–3 = Accel, Gyro, Orient, Record; `zero` 0 busy / 1 done / 2 moved; `q` is the quaternion the Orient page shows, fused when `fused` = 1, gyro-only when 0; `stale` = polls since power-on without new accelerometer data; `acc200` = 1 if the accelerometer was confirmed at 200 Hz; `bat_pct` 0–100 (−1 unknown), `bat_mv` millivolts, `charging` 0/1; sample `t_ms` is time since boot. Only names of the form `RUNnn.CSV` can be listed, downloaded or deleted. `del_seq`, `del_state`, `del_name`: the latest delete request and its state (1 waiting for KEY1, 2 deleted, 3 cancelled or timed out, 4 failed).
 
 ### USB interface
 
@@ -291,8 +294,8 @@ The USB page (Web Serial) sends one command per line; the StickS3 replies with l
 | --- | --- |
 | `HELLO` | `@HELLO,sticks3-imu-logger,<hotspot name>` |
 | `LIST` | `@F,<name>,<size>` per recording, then `@FILES,<count>` |
-| `GET <name>` | `@BEGIN,<name>,<size>`, exactly `<size>` bytes of the file, a newline, `@END,<name>` |
-| `DEL <name>` | `@OK,DEL,<name>` or `@ERR,DEL,<name>` |
+| `GET <name>` | `@BEGIN,<name>,<size>`, exactly `<size>` bytes of the file, a newline, `@END,<name>`. If the computer stops reading, the StickS3 abandons the transfer without `@END`, and the page discards it |
+| `DEL <name>` | `@OK,DEL,<request number>` (the StickS3 now asks for KEY1) or `@ERR,DEL,<name>` (bad name, or another delete is waiting). The outcome appears as `del_state` in the status line |
 | `LIVE 1` / `LIVE 0` | Starts / stops the live stream: `@S,…` and `@L,…` lines with the same fields as the WebSocket stream, but every sample (100 Hz). The page repeats `LIVE 1` every 3 s; the stream stops by itself 10 s after the last one |
 
 ---
@@ -312,8 +315,11 @@ The USB page (Web Serial) sends one command per line; the StickS3 replies with l
 | Angles drift on pages 2–3 | Normal for a gyro: re-zero with KEY1 (hold still) |
 | Screen blank after flashing | Still in download mode: unplug, double-press power to turn off, press to turn on |
 | `99 runs: delete some` or `Save failed (full?)` | Download, then delete old runs in the Record view |
-| `Storage was reset` at start-up | The storage was empty or damaged and has been formatted; earlier runs are gone |
-| `No storage` | The storage could not be mounted or formatted; recording is off, the other pages work. Re-flash with Erase Flash |
+| `Storage prepared` at start-up | The storage was blank (new or erased StickS3) and has been set up |
+| `Storage error` | The storage holds data but cannot be read; it is left untouched and recording is off. To start again, go to the Record page, hold KEY1, then hold KEY1 again within 5 s: **this erases all runs** |
+| `No storage` | The storage partition could not be used at all; re-flash with the web installer |
+| Delete does nothing | Press KEY1 on the StickS3 within 10 s when it shows `Del RUNnn.CSV? KEY1` |
+| *Download failed* (USB) | The transfer was interrupted; click Download again |
 | `Wi-Fi not available` | The hotspot failed to start; turn the StickS3 off and on |
 | `web page failed` / `Web page failed` | The hotspot is visible but the web server did not start; turn the StickS3 off and on |
 | Battery runs down quickly | The hotspot is always on; charge between lessons |

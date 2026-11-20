@@ -3,8 +3,10 @@
 // net.cpp - storage, Wi-Fi hotspot, web server and live stream
 //
 // Storage: the "storage" FAT partition (see partitions.csv) is mounted at DATA_DIR with
-//          wear levelling; recordings are saved there by main.cpp. It is formatted only
-//          after two failed mounts (first boot, or damage), and the caller is told.
+//          wear levelling; recordings are saved there by main.cpp. It is formatted
+//          automatically only when it is blank (a new or erased device). A partition that
+//          holds data but will not mount (damage, or a future incompatible format) is never
+//          formatted automatically: the user must erase it on purpose (Record page).
 //
 // Hotspot: open Wi-Fi network "IMU-xxxxxx" (last three bytes of the factory MAC), on channel
 //          1, 6 or 11 chosen from the same MAC so a classroom of devices is spread over the
@@ -27,6 +29,7 @@
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_mac.h"
+#include "esp_partition.h"
 #include "esp_netif.h"
 #include "esp_vfs_fat.h"
 #include "esp_wifi.h"
@@ -63,31 +66,64 @@ static constexpr int BEACON_TU = 200;                // beacon interval, time un
 static constexpr int8_t TX_POWER_QDBM = 44;          // 11 dBm (units of 0.25 dBm); default about 20 dBm
 
 // ------------------------------------------------------------------------------- storage
-// Mount without formatting; retry once (a passing fault then costs nothing). Only if both
-// fail, format explicitly: esp_vfs_fat_spiflash_format_rw_wl() returns ESP_OK only after the
-// partition has really been formatted, so STORAGE_RESET is reported only when data was erased.
-// A brand-new device takes this path once, on its first boot.
-StorageState storage_init(void)
+static const char* PART_LABEL = "storage";
+
+static esp_vfs_fat_mount_config_t mount_config(void)
 {
     esp_vfs_fat_mount_config_t cfg = {};
-    cfg.format_if_mount_failed = false;
+    cfg.format_if_mount_failed = false;                  // never format as a side effect
     cfg.max_files = 4;
     cfg.allocation_unit_size = 4096;
-    static wl_handle_t wl = WL_INVALID_HANDLE;
+    return cfg;
+}
+static wl_handle_t s_wl = WL_INVALID_HANDLE;
 
+// True if the partition is still erased flash (all 0xFF) at both ends, where the file system
+// (start) and the wear-levelling state (end) would be: a new or fully erased device.
+static bool partition_blank(void)
+{
+    const esp_partition_t* part = esp_partition_find_first(ESP_PARTITION_TYPE_DATA,
+                                                           ESP_PARTITION_SUBTYPE_DATA_FAT, PART_LABEL);
+    if (!part) return false;
+    static uint32_t buf[1024];                           // 4 KB
+    const size_t chunk = sizeof(buf), span = 4 * chunk;  // check 16 KB at each end
+    const size_t bases[2] = {0, part->size - span};
+    for (size_t base : bases) {
+        for (size_t off = 0; off < span; off += chunk) {
+            if (esp_partition_read(part, base + off, buf, chunk) != ESP_OK) return false;
+            for (uint32_t w : buf) if (w != 0xFFFFFFFFu) return false;
+        }
+    }
+    return true;
+}
+
+// Mount without formatting; retry once (a passing fault then costs nothing). If it still
+// fails, format only a blank partition. esp_vfs_fat_spiflash_format_rw_wl() returns ESP_OK
+// only after the partition has really been formatted, so STORAGE_RESET means just that.
+StorageState storage_init(void)
+{
+    esp_vfs_fat_mount_config_t cfg = mount_config();
     esp_err_t err = ESP_FAIL;
     for (int attempt = 0; attempt < 2 && err != ESP_OK; attempt++)
-        err = esp_vfs_fat_spiflash_mount_rw_wl(DATA_DIR, "storage", &cfg, &wl);
+        err = esp_vfs_fat_spiflash_mount_rw_wl(DATA_DIR, PART_LABEL, &cfg, &s_wl);
     if (err == ESP_OK) return STORAGE_OK;
 
-    ESP_LOGW(TAG, "FAT mount failed (%s); formatting the storage partition", esp_err_to_name(err));
-    if ((err = esp_vfs_fat_spiflash_format_rw_wl(DATA_DIR, "storage")) != ESP_OK) {
-        ESP_LOGE(TAG, "format failed: %s", esp_err_to_name(err));
-        return STORAGE_FAILED;
+    if (!partition_blank()) {
+        ESP_LOGE(TAG, "FAT mount failed (%s) and the partition holds data: not formatting", esp_err_to_name(err));
+        return STORAGE_DAMAGED;
     }
-    err = esp_vfs_fat_spiflash_mount_rw_wl(DATA_DIR, "storage", &cfg, &wl);
-    if (err != ESP_OK) { ESP_LOGE(TAG, "mount after format failed: %s", esp_err_to_name(err)); return STORAGE_FAILED; }
-    return STORAGE_RESET;
+    ESP_LOGW(TAG, "storage partition is blank: formatting");
+    return storage_erase() ? STORAGE_RESET : STORAGE_FAILED;
+}
+
+bool storage_erase(void)
+{
+    esp_err_t err = esp_vfs_fat_spiflash_format_rw_wl(DATA_DIR, PART_LABEL);
+    if (err != ESP_OK) { ESP_LOGE(TAG, "format failed: %s", esp_err_to_name(err)); return false; }
+    esp_vfs_fat_mount_config_t cfg = mount_config();
+    err = esp_vfs_fat_spiflash_mount_rw_wl(DATA_DIR, PART_LABEL, &cfg, &s_wl);
+    if (err != ESP_OK) { ESP_LOGE(TAG, "mount after format failed: %s", esp_err_to_name(err)); return false; }
+    return true;
 }
 
 // Only finished recordings, named exactly RUNnn.CSV, may be listed, downloaded or deleted.
@@ -162,13 +198,16 @@ static esp_err_t h_download(httpd_req_t* req)
     return httpd_resp_send_chunk(req, nullptr, 0);
 }
 
+// Deleting needs confirmation on the StickS3 (KEY1): reply at once with the request number;
+// the page then follows del_seq / del_state in the status line.
 static esp_err_t h_delete(httpd_req_t* req)
 {
-    char name[16], path[40];
+    char name[16], reply[24];
     if (!query_file(req, name, sizeof(name))) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad name");
-    snprintf(path, sizeof(path), "%s/%s", DATA_DIR, name);
-    if (unlink(path) != 0) return httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "not found");
-    return httpd_resp_sendstr(req, "ok");
+    const int seq = request_delete(name);
+    if (!seq) return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "busy");
+    snprintf(reply, sizeof(reply), "pending,%d", seq);
+    return httpd_resp_sendstr(req, reply);
 }
 
 // WebSocket endpoint. The handshake (GET) needs no work; clients are found later with
@@ -226,13 +265,14 @@ static void send_batch(void* arg)
 // Status line (lets the browser follow the device and draw angles and orientation):
 //   #S,page,zero,rec_on,rec_n,rec_target,dur_s,last_rows,last_file,
 //      bias_x,bias_y,bias_z,theta_x,theta_y,theta_z,q_w,q_x,q_y,q_z,stale,acc200,fused,
-//      bat_pct,bat_mv,charging
+//      bat_pct,bat_mv,charging,del_seq,del_state,del_name
 //   page 0..3 = Accel, Gyro, Orient, Record; zero 0 busy / 1 done / 2 moved;
 //   bias in deg/s, theta in degrees, q = the Orient page's quaternion: fused (roll/pitch
 //   relative to gravity, yaw relative to zeroing) when fused = 1, gyro-only when fused = 0;
 //   stale = polls since boot without new accelerometer data;
 //   acc200 = 1 if the accelerometer was confirmed at 200 Hz, 0 if it stayed at 100 Hz;
-//   bat_pct 0-100 (-1 unknown, smoothed), bat_mv in millivolts, charging 0/1 (USB power present).
+//   bat_pct 0-100 (-1 unknown, smoothed), bat_mv in millivolts, charging 0/1 (USB power present);
+//   del_seq / del_state / del_name: the latest delete request and its state (see app.h).
 // Sample lines:
 //   t_ms,ax,ay,az,wx,wy,wz   (ms since boot, g, deg/s; gyro offset not removed)
 // Over USB the same lines start with "@S," and "@L," instead, and every sample is sent
@@ -241,7 +281,7 @@ static void send_batch(void* arg)
 // Back-pressure (Wi-Fi): sending runs on the server task and can block (slow or sleeping
 // client, a download in progress). At most MAX_PENDING messages may wait; while that many
 // are pending, new samples are dropped from the stream (never from recordings).
-static constexpr size_t STATUS_MAX = 256;
+static constexpr size_t STATUS_MAX = 320;
 static constexpr size_t SAMPLE_MAX = 64;
 static constexpr int    LIVE_STEP  = SAMPLE_HZ / LIVE_HZ;  // 4: keep every 4th sample
 
@@ -253,13 +293,17 @@ int status_fields(char* buf, size_t n)
     imu_view(&v);
     const bool fused = ui_orient_fused;
     const float* qo = fused ? v.qf : v.q;                    // what the Orient page shows
+    int del_seq, del_state;
+    char del_name[16];
+    delete_status(&del_seq, &del_state, del_name, sizeof(del_name));
     const int len = snprintf(buf, n,
-        "%d,%d,%d,%d,%d,%d,%d,%s,%.3f,%.3f,%.3f,%.2f,%.2f,%.2f,%.5f,%.5f,%.5f,%.5f,%lu,%d,%d,%d,%d,%d",
+        "%d,%d,%d,%d,%d,%d,%d,%s,%.3f,%.3f,%.3f,%.2f,%.2f,%.2f,%.5f,%.5f,%.5f,%.5f,%lu,%d,%d,%d,%d,%d,%d,%d,%s",
         ui_page.load(), imu_zero_result(), imu_rec_running() ? 1 : 0, imu_rec_count(),
         imu_rec_target(), ui_dur_s.load(), ui_last_rows.load(), last_file,
         v.bias[0], v.bias[1], v.bias[2], v.theta[0], v.theta[1], v.theta[2],
         qo[0], qo[1], qo[2], qo[3], (unsigned long)imu_stale_reads(), imu_accel_200hz() ? 1 : 0,
-        fused ? 1 : 0, imu_battery_percent(), imu_battery_mv(), imu_battery_charging() ? 1 : 0);
+        fused ? 1 : 0, imu_battery_percent(), imu_battery_mv(), imu_battery_charging() ? 1 : 0,
+        del_seq, del_state, del_name);
     return (len < 0 || len >= (int)n) ? 0 : len;
 }
 

@@ -17,7 +17,10 @@
 //   pages 2-3  measure the gyro offset (hold still about 1 s), then zero the angles
 //              (Orient, fused: roll/pitch snap to the measured tilt, yaw = 0)
 //   page 3     hold: switch Orient between fused and gyro-only
-//   page 4     press: start recording; hold: change the length (5/10/20/30/60 s)
+//   page 4     press: start recording; hold: change the length (5/10/20/30/60 s);
+//              with damaged storage, hold twice within 5 s: erase it
+// Delete requests from the web page show "Del RUNnn.CSV? KEY1" on any page: KEY1 deletes,
+// KEY2 or 10 s without an answer cancels.
 //
 // The Wi-Fi hotspot starts at power-on. Every page streams live to http://192.168.4.1, and the
 // web page follows the page shown here. Sampling runs on its own task (imu.cpp) and the
@@ -28,6 +31,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <M5Unified.h>
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
 #include "app.h"
 
 static constexpr int PAGES = 4;
@@ -46,10 +51,51 @@ std::atomic<bool> ui_orient_fused{true};
 static int page = PAGE_ACCEL;
 static int dur_i = DEFAULT_DUR_I;
 static bool storage_ok = false;
+static bool storage_damaged = false;                       // holds data but will not mount
 // Recorder error shown on the Record page until the next KEY1 press ("" = none).
 static char rec_error[24] = "";
 
 static constexpr float DEG = 180.0f / (float)M_PI;
+
+// ---- Delete requests from the web page, confirmed with KEY1 on the device (see app.h).
+// request_delete() runs on the web-server or USB task; the main loop shows the question,
+// waits for KEY1 (yes) or KEY2 (no) for DELETE_WAIT_MS, then deletes and reports.
+static constexpr int64_t DELETE_WAIT_MS = 10000;
+static portMUX_TYPE s_del_lock = portMUX_INITIALIZER_UNLOCKED;
+static int  s_del_seq = 0, s_del_state = DEL_NONE;
+static char s_del_name[16] = "";
+
+int request_delete(const char* name)
+{
+    if (!is_run_name(name)) return 0;
+    int seq = 0;
+    taskENTER_CRITICAL(&s_del_lock);
+    if (s_del_state != DEL_WAITING) {
+        strncpy(s_del_name, name, sizeof(s_del_name) - 1);
+        s_del_name[sizeof(s_del_name) - 1] = 0;
+        seq = ++s_del_seq;
+        s_del_state = DEL_WAITING;
+    }
+    taskEXIT_CRITICAL(&s_del_lock);
+    return seq;
+}
+
+void delete_status(int* seq, int* state, char* name, size_t n)
+{
+    taskENTER_CRITICAL(&s_del_lock);
+    *seq = s_del_seq;
+    *state = s_del_state;
+    strncpy(name, s_del_name, n - 1);
+    name[n - 1] = 0;
+    taskEXIT_CRITICAL(&s_del_lock);
+}
+
+static void delete_finish(int state)
+{
+    taskENTER_CRITICAL(&s_del_lock);
+    s_del_state = state;
+    taskEXIT_CRITICAL(&s_del_lock);
+}
 
 // Screen layout: 240 x 135 landscape, text size 2 (12 x 16 px characters, 20 per line).
 static constexpr int Y_TITLE = 4, Y_ROW1 = 34, ROW_STEP = 26, Y_BOTTOM = 116;
@@ -193,7 +239,7 @@ static void draw_values(const ImuView& v)
         if (rec_error[0])          line(94, TFT_RED, "%s", rec_error);
         else if (ui_last_run > 0)  line(94, TFT_GREEN, "RUN%02d.CSV %d rows", ui_last_run.load(), ui_last_rows.load());
         else                       line(94, TFT_DARKGREY, "");
-        line(Y_BOTTOM, TFT_DARKGREY, "KEY1: record");
+        line(Y_BOTTOM, TFT_DARKGREY, storage_damaged ? "Hold KEY1: erase" : "KEY1: record");
     }
 }
 
@@ -271,8 +317,9 @@ void app_run(void)
         M5.Display.fillScreen(TFT_BLACK);
     }
 
-    // Storage: tell the user if it had to be formatted (first boot, or damaged), because
-    // any recordings on it are gone. Without storage the other pages still work.
+    // Storage: a blank partition (new or erased device) is formatted and the user is told.
+    // A partition that holds data but will not mount is left alone: recording is off until
+    // the user erases it deliberately on the Record page. The other pages still work.
     switch (storage_init()) {
     case STORAGE_OK:
         storage_ok = true;
@@ -281,8 +328,17 @@ void app_run(void)
     case STORAGE_RESET:
         storage_ok = true;
         printf("# storage was formatted\n");
-        text(30, TFT_ORANGE, "Storage was reset");
-        text(50, TFT_DARKGREY, "(old runs erased)");
+        text(30, TFT_ORANGE, "Storage prepared");
+        text(50, TFT_DARKGREY, "(new or erased)");
+        M5.delay(3000);
+        M5.Display.fillScreen(TFT_BLACK);
+        break;
+    case STORAGE_DAMAGED:
+        storage_damaged = true;
+        printf("# storage holds data but cannot be mounted; not erased\n");
+        snprintf(rec_error, sizeof(rec_error), "Storage error");
+        text(30, TFT_RED, "Storage error");
+        text(50, TFT_DARKGREY, "Record page: erase");
         M5.delay(3000);
         M5.Display.fillScreen(TFT_BLACK);
         break;
@@ -298,15 +354,55 @@ void app_run(void)
     draw_static();
 
     bool zeroing = false, was_recording = false;
+    int64_t del_deadline = 0, erase_armed_until = 0;
     while (true) {
+        const int64_t now_ms = esp_timer_get_time() / 1000;
+        bool k1 = ev_key1_click.exchange(false);
+        bool k1_hold = ev_key1_hold.exchange(false);
+        bool k2 = ev_key2_click.exchange(false);
+
+        // Recording finished (the IMU task clears the flag): save it first, before any
+        // button press below can start a new recording and reuse the buffer.
+        if (was_recording && !imu_rec_running()) {
+            was_recording = false;
+            save_recording();
+        }
+
+        // Delete request from the web page: ask on the screen, KEY1 = yes, KEY2 = no.
+        // While it waits, the buttons answer the question and do nothing else.
+        int del_seq, del_state;
+        char del_name[16];
+        delete_status(&del_seq, &del_state, del_name, sizeof(del_name));
+        if (del_state == DEL_WAITING) {
+            if (!del_deadline) del_deadline = now_ms + DELETE_WAIT_MS;
+            if (k1) {
+                char path[40];
+                snprintf(path, sizeof(path), "%s/%s", DATA_DIR, del_name);
+                delete_finish(unlink(path) == 0 ? DEL_DONE : DEL_FAILED);
+            } else if (k2 || now_ms > del_deadline) {
+                delete_finish(DEL_CANCELLED);
+            }
+            if (k1 || k2 || now_ms > del_deadline) {
+                del_deadline = 0;
+                draw_static();
+            } else {
+                ImuView v;
+                imu_view(&v);
+                draw_values(v);
+                M5.Display.fillRect(0, Y_BOTTOM - 4, 240, 23, TFT_BLACK);
+                line(Y_BOTTOM, TFT_YELLOW, "Del %s? KEY1", del_name);
+                M5.delay(100);
+                continue;
+            }
+            k1 = k1_hold = k2 = false;                      // the press answered the question
+        }
+
         // KEY2: next page (not while a measurement is running).
-        if (ev_key2_click.exchange(false) && !zeroing && !imu_rec_running()) {
+        if (k2 && !zeroing && !imu_rec_running()) {
             page = (page + 1) % PAGES;
             ui_page = page;
             draw_static();
         }
-        const bool k1 = ev_key1_click.exchange(false);
-        const bool k1_hold = ev_key1_hold.exchange(false);
 
         // KEY1 on Gyro / Orient: start zeroing, then wait for the IMU task's result.
         if ((page == PAGE_GYRO || page == PAGE_ORIENT) && k1 && !zeroing) {
@@ -324,6 +420,30 @@ void app_run(void)
         if (page == PAGE_ORIENT && k1_hold && !zeroing) {
             ui_orient_fused = !ui_orient_fused;
             draw_static();
+        }
+
+        // Damaged storage on the Record page: hold KEY1 twice within 5 s to erase it.
+        if (page == PAGE_RECORD && storage_damaged) {
+            if (erase_armed_until && now_ms > erase_armed_until) {
+                erase_armed_until = 0;
+                snprintf(rec_error, sizeof(rec_error), "Storage error");
+            }
+            if (k1_hold && !erase_armed_until) {
+                erase_armed_until = now_ms + 5000;
+                snprintf(rec_error, sizeof(rec_error), "Hold again: ERASE");
+            } else if (k1_hold) {
+                erase_armed_until = 0;
+                line(94, TFT_YELLOW, "Erasing...");
+                if (storage_erase()) {
+                    storage_damaged = false;
+                    storage_ok = true;
+                    snprintf(rec_error, sizeof(rec_error), "Storage erased");
+                    printf("# storage erased by the user\n");
+                } else {
+                    snprintf(rec_error, sizeof(rec_error), "Erase failed");
+                }
+            }
+            k1_hold = false;
         }
 
         // KEY1 on Record: hold changes the length, press starts recording.
@@ -344,12 +464,6 @@ void app_run(void)
                 }
             }
         }
-        // Recording finished (the IMU task clears the flag): write the file.
-        if (was_recording && !imu_rec_running()) {
-            was_recording = false;
-            save_recording();
-        }
-
         ImuView v;
         imu_view(&v);
         draw_values(v);
