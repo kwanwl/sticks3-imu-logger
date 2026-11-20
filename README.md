@@ -180,20 +180,14 @@ After rebuilding the firmware:
 
 ## 6. Building from source
 
-Needs **ESP-IDF v6.1** (tested). M5Stack's M5Unified 0.3.0 and M5GFX 0.3.0 are downloaded by the component manager; exact versions are pinned in `dependencies.lock`.
+Full step-by-step instructions (installing ESP-IDF, ports on each system, flashing, troubleshooting, making a release): **[BUILDING.md](BUILDING.md)**. The Arduino IDE version has its own short guide: **[arduino/README.md](arduino/README.md)**.
+
+In brief, with **ESP-IDF v6.1** ready in the terminal:
 
 ```bash
-source ~/.espressif/tools/activate_idf_v6.1.sh      # or your ESP-IDF export.sh
-cd sticks3-imu-logger
-idf.py set-target esp32s3                           # first time only (creates sdkconfig)
-idf.py -p /dev/cu.usbmodem1101 flash monitor        # port name differs per computer
+idf.py set-target esp32s3                  # first time only
+idf.py -p PORT flash monitor               # e.g. /dev/cu.usbmodem1101, /dev/ttyACM0, COM5
 ```
-
-- `idf.py app-flash` replaces only the program; `idf.py flash` also writes the bootloader and partition table. Recordings survive both unless `partitions.csv` changes.
-- Update the browser image after code changes:
-  `idf.py merge-bin -o sticks3-imu-logger.bin && cp build/sticks3-imu-logger.bin firmware/`
-- Settings live in `sdkconfig.defaults`; `sdkconfig` is generated and not committed. After changing `sdkconfig.defaults`, delete `sdkconfig` and run `idf.py set-target esp32s3` again.
-- **ESP-IDF v6 workaround:** M5GFX/M5Unified include `esp_psram.h` without declaring the `esp_psram` component, so `CMakeLists.txt` adds it to every component: `idf_build_set_property(__COMPONENT_REQUIRES_COMMON esp_psram APPEND)`. Remove it once M5Stack fixes their libraries.
 
 ### Project structure
 
@@ -211,6 +205,9 @@ sticks3-imu-logger/
     usb.cpp             the same live stream and recordings over the USB cable
     web/index.html      the web page (built into the firmware; also served by GitHub Pages for USB)
     idf_component.yml   M5Unified dependency
+  BUILDING.md           how to build and flash from source
+  arduino/
+    README.md           Arduino IDE guide
   arduino/sticks3_imu_logger/   Arduino IDE version (see "Arduino version")
     sticks3_imu_logger.ino      entry point: setup() calls app_run()
     sketch.yaml                 board settings and versions for arduino-cli
@@ -242,50 +239,7 @@ After any of these changes, run `python3 tools/sync_arduino.py` so the Arduino v
 
 ### Arduino version
 
-`arduino/sticks3_imu_logger/` is the same firmware for the Arduino IDE: the same source files, behaviour, web page, CSV format and flash layout. Use whichever toolchain you prefer; recordings made with one are kept when you flash the other.
-
-**Setup (Arduino IDE 2):**
-
-1. Boards Manager: install **esp32 by Espressif Systems**, version **3.3.x** (tested 3.3.0).
-2. Library Manager: install **M5Unified 0.3.0** (it installs M5GFX 0.3.0 with it).
-3. Open `arduino/sticks3_imu_logger/sticks3_imu_logger.ino` and set the Tools menu:
-
-| Setting | Value |
-| --- | --- |
-| Board | **ESP32S3 Dev Module** |
-| USB CDC On Boot | Enabled |
-| USB Mode | Hardware CDC and JTAG |
-| CPU Frequency | 240MHz (WiFi) |
-| Flash Size | 8MB (64Mb) |
-| Partition Scheme | **Custom** (uses `partitions.csv` in the sketch folder) |
-| PSRAM | **OPI PSRAM** |
-
-4. Choose the StickS3's port and click **Upload**.
-
-With arduino-cli the settings come from `sketch.yaml`: `arduino-cli compile .` then `arduino-cli upload -p <port> .` in the sketch folder (`--profile sticks3` also pins the core and library versions).
-
-**Differences from the ESP-IDF version:**
-
-| Topic | ESP-IDF version | Arduino version |
-| --- | --- | --- |
-| Underlying ESP-IDF | 6.1 | 5.5 (inside Arduino core 3.3) |
-| Board selection | Fixed in `sdkconfig.defaults` | No StickS3 entry in core 3.3.0: choose ESP32S3 Dev Module and the settings above |
-| Low-level settings (sdkconfig) | Editable | Fixed by the core. What this firmware needs (WebSocket support, 1000 Hz tick, 1 KB HTTP headers) is already enabled |
-| ESP-IDF v6 workaround (`esp_psram`) | Needed | Not needed |
-| Web page | Embedded from `main/web/index.html` | Generated header `index_html.h` |
-| Entry point | `app_main()` | `setup()` calls `app_run()`; `loop()` is unused |
-| Build time | Full rebuild a few minutes | Similar; first build compiles the core |
-| Boot log | ESP-IDF messages plus `# ` status lines | Only the `# ` status lines, plus a harmless `No core dump partition found` (the core expects a crash-dump area this layout does not have) |
-| Hotspot name and channel | From the chip's factory MAC, e.g. `IMU-DA5734`, channel 6 | Same name and channel on the same device |
-
-**Keeping them in step:** `main/` is the single source. Edit there, then run `python3 tools/sync_arduino.py`; `--check` reports whether the sketch folder is out of date. The copied files start with a `GENERATED` comment. Students who only use the Arduino IDE can edit their own copy freely, but changes meant for the repository belong in `main/`.
-
-**Wrong Tools settings, and what you see:**
-
-- PSRAM disabled: recording shows *No record buffer* (the 168 KB buffer needs PSRAM).
-- Partition Scheme not Custom: the storage partition is missing, so the screen shows *No storage* and recording is off.
-- USB CDC On Boot disabled: no output in the Serial Monitor, and uploading may need download mode.
-- Arduino IDE *Erase All Flash Before Sketch Upload* enabled: saved recordings are erased.
+`arduino/sticks3_imu_logger/` is the same firmware for the Arduino IDE (same source files, behaviour, web page, CSV format and flash layout; recordings are kept when switching). Setup, the required Tools settings (ESP32S3 Dev Module, OPI PSRAM, 8 MB flash, Custom partitions) and the differences from the ESP-IDF build are in **[arduino/README.md](arduino/README.md)**. `main/` is the single source: edit there and run `python3 tools/sync_arduino.py`.
 
 ---
 
